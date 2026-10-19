@@ -1,8 +1,10 @@
-/* SubscribeConfigurator — frontend patch v5
- * v5 changes vs v4:
- *   - Tight selector (only .v-dialog + .v-overlay__content + [role="dialog"])
- *   - Skip elements with v-card-link class (MP plugin catalog cards match v4 too greedily)
- *   - Same UI as v3 but diagnostic logs include v5 marker
+/* SubscribeConfigurator — frontend patch v6
+ * v6 changes vs v5:
+ *   - Match only dialogs whose "submit button" text is "提交订阅" / "添加订阅"
+ *     (skip edit dialog which uses "保存" + "取消订阅"; skip plugin cards)
+ *   - Skip on dialog text containing "开始集数" (extra defense)
+ *   - Strip any pre-existing injected panels when dialog appears (so v4/v5 leftover DOM
+ *     gets removed once v6 takes over)
  */
 (function () {
   "use strict";
@@ -141,7 +143,7 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
     const panel = el("div", {
-      [PANEL_MARKER]: "v5",
+      [PANEL_MARKER]: "v6",
       style:
         "margin-top: 8px; padding-top: 12px;" +
         "border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
@@ -166,7 +168,8 @@
     return panel;
   }
 
-  // v5: precise dialog-only selectors (avoid plugin cards which are also .v-card)
+  // v6: precise submit-button match — only inject into dialogs whose primary action
+  // button is "提交订阅" or "添加订阅" (skip edit dialog which uses "保存")
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
     const candidates = root.querySelectorAll(
@@ -174,31 +177,43 @@
     );
     let injected = 0;
     candidates.forEach(function (dialog, idx) {
-      if (!dialog || dialog.__mp_sc_patched) return;
-      // Skip plugin catalog cards — they have v-card-link class
+      if (!dialog) return;
+      // Strip any pre-existing injected panel from earlier patch versions
+      const old = dialog.querySelector('[data-mp-subscribe-configurator]');
+      if (old) old.remove();
+      if (dialog.__mp_sc_patched) return;
+      // Skip plugin catalog cards
       if (dialog.classList && dialog.classList.contains("v-card-link")) return;
+      // Skip if dialog text contains EDIT-dialog markers
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
-      // Skip edit dialog (already exposes fields natively)
       if (text.indexOf("开始集数") !== -1) return;
-      // Must look like a dialog with form controls
-      if (!dialog.querySelector("button, .v-btn, input, .v-input, .v-list, .v-list-item")) return;
-      if (dialog.querySelector("[" + PANEL_MARKER + "]")) {
-        dialog.__mp_sc_patched = true;
-        return;
+      if (text.indexOf("总集数") !== -1) return;
+      // Find primary submit button text
+      const btns = dialog.querySelectorAll("button, .v-btn");
+      let isAdd = false;
+      for (let i = 0; i < btns.length; i++) {
+        const btnText = (btns[i].textContent || "").trim();
+        if (/^提交订阅$|^添加订阅$|^新增订阅$/.test(btnText)) {
+          isAdd = true;
+          break;
+        }
       }
+      if (!isAdd) return;
+      // Must have form-like controls
+      if (!dialog.querySelector("input, .v-input, .v-list, .v-list-item")) return;
       const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
       console.info(
-        "[subscribeconfigurator v5] injected into dialog #" + idx,
+        "[subscribeconfigurator v6] injected into add dialog #" + idx,
         "class:", (dialog.className || "").substring(0, 80),
         "text snippet:", text.substring(0, 50).replace(/\s+/g, " ")
       );
     });
     if (injected > 0) {
-      console.info("[subscribeconfigurator v5] injected into", injected, "dialog(s)");
+      console.info("[subscribeconfigurator v6] injected into", injected, "dialog(s)");
     }
   }
 
@@ -213,7 +228,7 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v5] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v6] loaded, MutationObserver active");
   }
 
   // Wrap in try/catch + global error capture
@@ -230,6 +245,6 @@
       attach();
     }
   } catch (e) {
-    console.error("[subscribeconfigurator v5] FATAL on attach", e);
+    console.error("[subscribeconfigurator v6] FATAL on attach", e);
   }
 })();
