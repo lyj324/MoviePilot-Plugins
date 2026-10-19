@@ -143,7 +143,7 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
     const panel = el("div", {
-      [PANEL_MARKER]: "v6",
+      [PANEL_MARKER]: "v7",
       style:
         "margin-top: 8px; padding-top: 12px;" +
         "border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
@@ -168,8 +168,8 @@
     return panel;
   }
 
-  // v6: precise submit-button match — only inject into dialogs whose primary action
-  // button is "提交订阅" or "添加订阅" (skip edit dialog which uses "保存")
+  // v7: precise submit-button match — only inject into dialogs whose primary action
+  // button is "提交订阅" / "添加订阅" / "请选择订阅季" (skip edit dialog which uses "保存")
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
     const candidates = root.querySelectorAll(
@@ -194,7 +194,7 @@
       let isAdd = false;
       for (let i = 0; i < btns.length; i++) {
         const btnText = (btns[i].textContent || "").trim();
-        if (/^提交订阅$|^添加订阅$|^新增订阅$/.test(btnText)) {
+        if (/^提交订阅$|^添加订阅$|^新增订阅$|^请选择订阅季$/.test(btnText)) {
           isAdd = true;
           break;
         }
@@ -207,13 +207,13 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
       console.info(
-        "[subscribeconfigurator v6] injected into add dialog #" + idx,
-        "class:", (dialog.className || "").substring(0, 80),
+        "[subscribeconfigurator v7] injected into add dialog #" + idx,
+        "button found in:", (dialog.className || "").substring(0, 80),
         "text snippet:", text.substring(0, 50).replace(/\s+/g, " ")
       );
     });
     if (injected > 0) {
-      console.info("[subscribeconfigurator v6] injected into", injected, "dialog(s)");
+      console.info("[subscribeconfigurator v7] injected into", injected, "dialog(s)");
     }
   }
 
@@ -228,7 +228,7 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v6] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v7] loaded, MutationObserver active");
   }
 
   // Wrap in try/catch + global error capture
@@ -245,6 +245,6 @@
       attach();
     }
   } catch (e) {
-    console.error("[subscribeconfigurator v6] FATAL on attach", e);
+    console.error("[subscribeconfigurator v7] FATAL on attach", e);
   }
 })();
