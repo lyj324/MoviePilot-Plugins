@@ -143,7 +143,7 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
     const panel = el("div", {
-      [PANEL_MARKER]: "v7",
+      [PANEL_MARKER]: "v8",
       style:
         "margin-top: 8px; padding-top: 12px;" +
         "border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
@@ -168,52 +168,76 @@
     return panel;
   }
 
-  // v7: precise submit-button match — only inject into dialogs whose primary action
-  // button is "提交订阅" / "添加订阅" / "请选择订阅季" (skip edit dialog which uses "保存")
+  // v8: precise submit-button match + diagnostic logs for every skip path.
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
     const candidates = root.querySelectorAll(
       ".v-dialog, .v-overlay__content, [role=\"dialog\"]"
     );
     let injected = 0;
+    let scanCount = 0;
     candidates.forEach(function (dialog, idx) {
       if (!dialog) return;
+      scanCount += 1;
       // Strip any pre-existing injected panel from earlier patch versions
       const old = dialog.querySelector('[data-mp-subscribe-configurator]');
       if (old) old.remove();
-      if (dialog.__mp_sc_patched) return;
+      if (dialog.__mp_sc_patched) {
+        console.info("[sc v8] dialog #" + idx + " already patched, skip");
+        return;
+      }
       // Skip plugin catalog cards
-      if (dialog.classList && dialog.classList.contains("v-card-link")) return;
+      if (dialog.classList && dialog.classList.contains("v-card-link")) {
+        console.info("[sc v8] dialog #" + idx + " skip: v-card-link (catalog card)");
+        return;
+      }
       // Skip if dialog text contains EDIT-dialog markers
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
-      if (text.indexOf("开始集数") !== -1) return;
-      if (text.indexOf("总集数") !== -1) return;
+      if (text.indexOf("开始集数") !== -1) {
+        console.info("[sc v8] dialog #" + idx + " skip: contains 开始集数 (edit dialog)");
+        return;
+      }
+      if (text.indexOf("总集数") !== -1) {
+        console.info("[sc v8] dialog #" + idx + " skip: contains 总集数 (edit dialog)");
+        return;
+      }
       // Find primary submit button text
       const btns = dialog.querySelectorAll("button, .v-btn");
+      const btnTexts = [];
       let isAdd = false;
       for (let i = 0; i < btns.length; i++) {
         const btnText = (btns[i].textContent || "").trim();
+        btnTexts.push(btnText);
         if (/^提交订阅$|^添加订阅$|^新增订阅$|^请选择订阅季$/.test(btnText)) {
           isAdd = true;
-          break;
+        }
+        // Edit dialog signature
+        if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) {
+          console.info("[sc v8] dialog #" + idx + " skip: has 保存 + 编辑订阅 (edit dialog)");
+          return;
         }
       }
-      if (!isAdd) return;
-      // Must have form-like controls
-      if (!dialog.querySelector("input, .v-input, .v-list, .v-list-item")) return;
+      if (!isAdd) {
+        console.info(
+          "[sc v8] dialog #" + idx + " skip: no add-subscribe button found. buttons:",
+          btnTexts,
+          "text snippet:", text.substring(0, 80).replace(/\s+/g, " ")
+        );
+        return;
+      }
       const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
       console.info(
-        "[subscribeconfigurator v7] injected into add dialog #" + idx,
-        "button found in:", (dialog.className || "").substring(0, 80),
-        "text snippet:", text.substring(0, 50).replace(/\s+/g, " ")
+        "[subscribeconfigurator v8] INJECTED into add dialog #" + idx,
+        "buttons:", btnTexts,
+        "text snippet:", text.substring(0, 80).replace(/\s+/g, " ")
       );
     });
-    if (injected > 0) {
-      console.info("[subscribeconfigurator v7] injected into", injected, "dialog(s)");
+    if (scanCount > 0) {
+      console.info("[subscribeconfigurator v8] scanned", scanCount, "dialog(s), injected", injected);
     }
   }
 
@@ -228,7 +252,7 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v7] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v8] loaded, MutationObserver active");
   }
 
   // Wrap in try/catch + global error capture
@@ -245,6 +269,6 @@
       attach();
     }
   } catch (e) {
-    console.error("[subscribeconfigurator v7] FATAL on attach", e);
+    console.error("[subscribeconfigurator v8] FATAL on attach", e);
   }
 })();
