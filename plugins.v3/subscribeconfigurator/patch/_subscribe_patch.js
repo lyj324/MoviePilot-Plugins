@@ -1,8 +1,9 @@
-/* SubscribeConfigurator — frontend patch v3
- * v3 changes vs v2:
- *   - Inject EXACTLY ONCE per dialog (skip nested .v-card to avoid double injection)
- *   - Use Vuetify VTextField-style outlined inputs (line-bottom border, theme-friendly)
- *   - Tighter layout matching MP native dialog aesthetic
+/* SubscribeConfigurator — frontend patch v4
+ * v4 changes vs v3:
+ *   - Ultra-broad selectors (covers Vuetify v-dialog + Quasar q-dialog + custom)
+ *   - Wraps attach() in try/catch; logs fatal errors to console
+ *   - Detailed per-dialog scan logs (so user can diagnose in F12)
+ *   - Injects into ANY plausible dialog except the edit one
  */
 (function () {
   "use strict";
@@ -80,57 +81,39 @@
     return node;
   }
 
-  // Vuetify-style outlined VTextField-ish. Reads CSS vars the app already provides
-  // (--v-theme-on-surface, --v-theme-surface, --v-border-color, --v-medium-emphasis-opacity).
   function buildField(field, overrides, defaultEp) {
-    const wrap = el("div", {
-      class: "mp-sc-field",
-      style:
-        "padding: 6px 0;" +
-        "font-family: inherit;",
-    });
-
-    const label = el("label", {
+    const wrap = el("div", { class: "mp-sc-field", style: "padding: 6px 0; font-family: inherit;" });
+    wrap.appendChild(el("label", {
       style:
         "display: block; font-size: 12px; line-height: 18px;" +
         "color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));",
       text: field.label,
-    });
-    wrap.appendChild(label);
-
+    }));
     const input = el("input", {
       type: field.type || "text",
       placeholder: field.placeholder || "",
       "data-mp-model": field.model,
       class: "mp-sc-input",
       style:
-        "width: 100%; box-sizing: border-box;" +
-        "padding: 4px 12px 8px 0;" +
+        "width: 100%; box-sizing: border-box; padding: 4px 12px 8px 0;" +
         "font: inherit; font-size: 14px;" +
         "color: rgb(var(--v-theme-on-surface));" +
-        "background: transparent;" +
-        "border: none;" +
+        "background: transparent; border: none;" +
         "border-bottom: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
-        "border-radius: 0;" +
-        "outline: none;" +
+        "border-radius: 0; outline: none;" +
         "transition: border-color 0.15s ease;",
     });
     const cur = overrides[field.model];
     if (cur !== undefined && cur !== null) input.value = String(cur);
     if (field.model === "start_episode" && !input.value && defaultEp > 0)
       input.value = String(defaultEp);
-
     input.addEventListener("focus", function () {
-      input.style.borderBottomColor =
-        "2px solid rgb(var(--v-theme-primary))";
-      input.style.borderBottom =
-        "2px solid rgb(var(--v-theme-primary))";
+      input.style.borderBottom = "2px solid rgb(var(--v-theme-primary))";
     });
     input.addEventListener("blur", function () {
       input.style.borderBottom =
         "1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity))";
     });
-
     input.addEventListener("input", function () {
       const next = readOverrides();
       const val = input.value.trim();
@@ -158,13 +141,10 @@
   function buildPanel() {
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
-
-    // Divider + subtle heading — Vuetify style
     const panel = el("div", {
-      [PANEL_MARKER]: "v3",
+      [PANEL_MARKER]: "v4",
       style:
-        "margin-top: 8px;" +
-        "padding-top: 12px;" +
+        "margin-top: 8px; padding-top: 12px;" +
         "border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
         "font-family: inherit;",
     });
@@ -172,54 +152,53 @@
       style:
         "font-size: 13px; font-weight: 500;" +
         "color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity));" +
-        "letter-spacing: 0.0125em;" +
-        "margin-bottom: 4px;",
+        "letter-spacing: 0.0125em; margin-bottom: 4px;",
       text: "订阅增强（SubscribeConfigurator）",
     }));
     panel.appendChild(el("div", {
       style:
-        "font-size: 11px;" +
-        "color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));" +
+        "font-size: 11px; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));" +
         "margin-bottom: 8px;",
       text: "字段值保存到 localStorage，提交订阅时自动附加。可在订阅详情页继续编辑。",
     }));
-
     FIELDS.forEach(function (field) {
       panel.appendChild(buildField(field, overrides, defaultEp));
     });
     return panel;
   }
 
-  // v3: pick .v-dialog only (Vuetify). Skip if already patched. Skip if "开始集数"
-  // exists (edit dialog). Skip if no form-like controls.
+  // v4: ultra-broad selector + per-dialog diagnostic logs.
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
-    const candidates = root.querySelectorAll(".v-dialog");
+    const candidates = root.querySelectorAll(
+      ".v-dialog, .v-overlay__content, [role=\"dialog\"], .q-dialog, .v-card, " +
+      "[class*=\"dialog\" i], [class*=\"Dialog\" i]"
+    );
     let injected = 0;
-    candidates.forEach(function (dialog) {
+    candidates.forEach(function (dialog, idx) {
       if (!dialog || dialog.__mp_sc_patched) return;
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
       // Skip edit dialog (already exposes fields natively)
       if (text.indexOf("开始集数") !== -1) return;
-      // Skip if no form-like controls
-      if (!dialog.querySelector("button, .v-btn, input, .v-input")) return;
+      // Must look like a dialog/form: has form controls
+      if (!dialog.querySelector("button, .v-btn, input, .v-input, .v-list, .v-list-item")) return;
       if (dialog.querySelector("[" + PANEL_MARKER + "]")) {
         dialog.__mp_sc_patched = true;
         return;
       }
-      // Inject into .v-card-text (Vuetify's content slot). Fall back to dialog.
-      const target = dialog.querySelector(".v-card-text, .v-card, form") || dialog;
+      const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
       console.info(
-        "[subscribeconfigurator v3] injected, dialog snippet:",
-        text.substring(0, 60).replace(/\s+/g, " ")
+        "[subscribeconfigurator v4] injected into dialog #" + idx,
+        "class:", (dialog.className || "").substring(0, 80),
+        "text snippet:", text.substring(0, 50).replace(/\s+/g, " ")
       );
     });
     if (injected > 0) {
-      console.info("[subscribeconfigurator v3] injected into", injected, "dialog(s)");
+      console.info("[subscribeconfigurator v4] injected into", injected, "dialog(s)");
     }
   }
 
@@ -234,12 +213,23 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v3] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v4] loaded, MutationObserver active");
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", attach);
-  } else {
-    attach();
+  // Wrap in try/catch + global error capture
+  window.addEventListener("error", function (e) {
+    if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1) {
+      console.error("[subscribeconfigurator v4] SCRIPT ERROR", e.message, e.filename, ":" + e.lineno);
+    }
+  });
+
+  try {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", attach);
+    } else {
+      attach();
+    }
+  } catch (e) {
+    console.error("[subscribeconfigurator v4] FATAL on attach", e);
   }
 })();
