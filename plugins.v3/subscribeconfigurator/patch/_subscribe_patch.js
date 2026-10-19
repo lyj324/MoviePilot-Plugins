@@ -1,9 +1,8 @@
-/* SubscribeConfigurator — frontend patch v4
- * v4 changes vs v3:
- *   - Ultra-broad selectors (covers Vuetify v-dialog + Quasar q-dialog + custom)
- *   - Wraps attach() in try/catch; logs fatal errors to console
- *   - Detailed per-dialog scan logs (so user can diagnose in F12)
- *   - Injects into ANY plausible dialog except the edit one
+/* SubscribeConfigurator — frontend patch v5
+ * v5 changes vs v4:
+ *   - Tight selector (only .v-dialog + .v-overlay__content + [role="dialog"])
+ *   - Skip elements with v-card-link class (MP plugin catalog cards match v4 too greedily)
+ *   - Same UI as v3 but diagnostic logs include v5 marker
  */
 (function () {
   "use strict";
@@ -142,7 +141,7 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
     const panel = el("div", {
-      [PANEL_MARKER]: "v4",
+      [PANEL_MARKER]: "v5",
       style:
         "margin-top: 8px; padding-top: 12px;" +
         "border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity));" +
@@ -167,21 +166,22 @@
     return panel;
   }
 
-  // v4: ultra-broad selector + per-dialog diagnostic logs.
+  // v5: precise dialog-only selectors (avoid plugin cards which are also .v-card)
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
     const candidates = root.querySelectorAll(
-      ".v-dialog, .v-overlay__content, [role=\"dialog\"], .q-dialog, .v-card, " +
-      "[class*=\"dialog\" i], [class*=\"Dialog\" i]"
+      ".v-dialog, .v-overlay__content, [role=\"dialog\"]"
     );
     let injected = 0;
     candidates.forEach(function (dialog, idx) {
       if (!dialog || dialog.__mp_sc_patched) return;
+      // Skip plugin catalog cards — they have v-card-link class
+      if (dialog.classList && dialog.classList.contains("v-card-link")) return;
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
       // Skip edit dialog (already exposes fields natively)
       if (text.indexOf("开始集数") !== -1) return;
-      // Must look like a dialog/form: has form controls
+      // Must look like a dialog with form controls
       if (!dialog.querySelector("button, .v-btn, input, .v-input, .v-list, .v-list-item")) return;
       if (dialog.querySelector("[" + PANEL_MARKER + "]")) {
         dialog.__mp_sc_patched = true;
@@ -192,13 +192,13 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
       console.info(
-        "[subscribeconfigurator v4] injected into dialog #" + idx,
+        "[subscribeconfigurator v5] injected into dialog #" + idx,
         "class:", (dialog.className || "").substring(0, 80),
         "text snippet:", text.substring(0, 50).replace(/\s+/g, " ")
       );
     });
     if (injected > 0) {
-      console.info("[subscribeconfigurator v4] injected into", injected, "dialog(s)");
+      console.info("[subscribeconfigurator v5] injected into", injected, "dialog(s)");
     }
   }
 
@@ -213,7 +213,7 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v4] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v5] loaded, MutationObserver active");
   }
 
   // Wrap in try/catch + global error capture
@@ -230,6 +230,6 @@
       attach();
     }
   } catch (e) {
-    console.error("[subscribeconfigurator v4] FATAL on attach", e);
+    console.error("[subscribeconfigurator v5] FATAL on attach", e);
   }
 })();
