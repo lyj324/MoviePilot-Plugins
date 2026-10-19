@@ -1,0 +1,2 @@
+# SubscribeConfigurator 没有 Python 依赖。
+# 运行时只需要 stdlib + MoviePilot v3 已提供的 app.plugins._PluginBase
