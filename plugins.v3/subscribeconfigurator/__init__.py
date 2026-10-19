@@ -27,7 +27,7 @@ class SubscribeConfigurator(_PluginBase):
     # ── 元数据 ──
     plugin_name = "订阅增强"
     plugin_desc = "在订阅添加对话框注入 start_episode / filter / quality 等字段，添加订阅时即可一次性配置。"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeconfigurator_"
@@ -35,7 +35,7 @@ class SubscribeConfigurator(_PluginBase):
     auth_level = 1
 
     # ── 常量 ──
-    PATCH_MARKER = "<!-- mp-subscribeconfigurator-patch v1 -->"
+    PATCH_MARKER = "<!-- mp-subscribeconfigurator-patch v3 -->"
     PATCH_SCRIPT_FILENAME = "_subscribe_patch.js"
     BACKUP_SUFFIX = ".subscribeconfigurator.bak"
 
@@ -238,8 +238,11 @@ class SubscribeConfigurator(_PluginBase):
         with open(bak, "w", encoding="utf-8") as f:
             f.write(content)
 
+        # cache-bust query 强制浏览器每次重新拿 patch.js（nginx 给 /public/*.js 设了 30d 缓存）
+        import time as _time
+        cache_bust = int(_time.time())
         script_tag = (
-            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}"></script>\n'
+            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}?v={cache_bust}"></script>\n'
             f"{self.PATCH_MARKER}"
         )
         if "</head>" in content:

@@ -18,13 +18,14 @@
     "name": "订阅增强",
     "description": "在订阅添加对话框注入 start_episode / filter / include / exclude / quality / resolution / effect 字段，添加订阅时即可配置，避免「添加后立即下载、错过配置窗口」的问题。",
     "labels": "订阅,增强",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "icon": "https://raw.githubusercontent.com/lyj324/MoviePilot-Plugins/main/icons/subscribeconfigurator.png",
     "author": "lyj324",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v0.3.0": "修复 plugin 升级后 patch 失效：script src 永久加 cache-bust timestamp（避免 nginx 30d 缓存命中旧 patch.js）；marker 升到 v3。",
       "v0.2.0": "patch v3：精确 selector 只注入一次（修复 v2 的 dialog 内+外双注入）；跳过编辑订阅 dialog（避免与原生字段重复）；style 模仿 Vuetify outlined VTextField 暗色主题。",
       "v0.1.0": "初版：init_plugin 时把劫持脚本写入 /public/_subscribe_patch.js；在 /public/index.html 注入 <script> 引用；停止时还原。"
     }
