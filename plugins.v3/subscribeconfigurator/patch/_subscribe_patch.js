@@ -1,22 +1,18 @@
-/* SubscribeConfigurator — frontend patch v11
- * v11 changes vs v10:
- *   - Full parity with MP's native EditDialog (basic + advance tabs):
- *     BASIC  : keyword, total_episode, start_episode, quality, resolution, effect,
- *              sites (multi), search_interval, downloader, save_path,
- *              best_version, best_version_full, search_imdbid
- *     ADVANCE: include, exclude, filter_groups (multi), episode_group, season,
- *              media_category, custom_words, filter (MP schema field, kept by request)
- *   - Option sources mirror MP exactly:
- *       static  : quality/resolution/effect/season(0-100)/search_interval/switches
- *       dynamic : sites <- GET /api/v1/site, downloader <- GET /api/v1/download/clients
- *   - Dynamic selects load async and degrade to a free-text input on failure,
- *     so the panel never blocks on a slow/failed API call.
+/* SubscribeConfigurator — frontend patch v12
+ * v12 fixes a CRITICAL bug: MP's frontend bundles axios (XMLHttpRequest adapter), so the
+ * v1..v11 window.fetch interceptor NEVER fired and no override was ever applied to the
+ * subscribe POST. v12 patches XMLHttpRequest.prototype.open/send instead.
+ * v12 also adds:
+ *   - "清空全部" button in the panel header (overrides used to require devtools to clear)
+ *   - active-override count badge so you can see what's queued
+ *   - one-shot auto-clear after a successful subscribe (LS_ONESHOT_KEY)
  */
 (function () {
   "use strict";
 
   const LS_OVERRIDES_KEY = "mp_subscribe_overrides";
   const LS_DEFAULT_EPISODE_KEY = "mp_subscribe_default_start_episode";
+  const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
   const API_BASE = "/api/v1";
 
@@ -28,44 +24,110 @@
     try { localStorage.setItem(LS_OVERRIDES_KEY, JSON.stringify(obj)); }
     catch (e) {}
   }
+  function clearOverrides() {
+    try {
+      localStorage.removeItem(LS_OVERRIDES_KEY);
+      localStorage.removeItem(LS_DEFAULT_EPISODE_KEY);
+    } catch (e) {}
+  }
   function readDefaultEpisode() {
     const raw = localStorage.getItem(LS_DEFAULT_EPISODE_KEY);
     if (!raw) return 0;
     const n = parseInt(raw, 10);
     return isNaN(n) ? 0 : n;
   }
+  function isOneShot() {
+    try { return localStorage.getItem(LS_ONESHOT_KEY) === "1"; }
+    catch (e) { return false; }
+  }
 
-  // ── fetch interception: merge overrides into subscribe POST ──
+  // Build the merged subscribe payload from current overrides.
+  function mergeOverrides(payload) {
+    const overrides = readOverrides();
+    let changed = false;
+    for (const k in overrides) {
+      if (!Object.prototype.hasOwnProperty.call(overrides, k)) continue;
+      const v = overrides[k];
+      if (v === "" || v === null || v === undefined) continue;
+      payload[k] = v;
+      changed = true;
+    }
+    const defaultEp = readDefaultEpisode();
+    if (defaultEp > 0 && (!payload.start_episode || payload.start_episode === 0)) {
+      payload.start_episode = defaultEp;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function maybeOneShot() {
+    if (!isOneShot()) return;
+    clearOverrides();
+    try { localStorage.removeItem(LS_ONESHOT_KEY); } catch (e) {}
+    console.info("[subscribeconfigurator v12] one-shot applied, overrides cleared");
+  }
+
+  // ── XHR interception (this is the path MP/axios actually uses) ──
+  if (window.XMLHttpRequest && !window.__mp_sc_xhr_patched) {
+    window.__mp_sc_xhr_patched = true;
+    const OrigOpen = XMLHttpRequest.prototype.open;
+    const OrigSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function (method, url) {
+      try {
+        this.__mpMethod = String(method || "GET").toUpperCase();
+        this.__mpUrl = String(url || "");
+      } catch (e) {}
+      return OrigOpen.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.send = function (body) {
+      try {
+        const method = this.__mpMethod || "GET";
+        const url = this.__mpUrl || "";
+        if (method === "POST" && url.indexOf("/subscribe") !== -1 &&
+            typeof body === "string" && body.charAt(0) === "{") {
+          const payload = JSON.parse(body);
+          if (mergeOverrides(payload)) {
+            body = JSON.stringify(payload);
+            console.info("[subscribeconfigurator v12] overrides merged into subscribe POST");
+          }
+        }
+      } catch (e) {}
+      return OrigSend.call(this, body);
+    };
+  }
+
+  // ── fetch interception (kept as a fallback for any fetch-based code path) ──
   const OrigFetch = window.fetch;
   window.fetch = function (resource, init) {
     try {
       const url = typeof resource === "string" ? resource : (resource && resource.url) || "";
       const method = ((init && init.method) || "GET").toUpperCase();
-      if (method === "POST" && url.indexOf("/api/v1/subscribe") !== -1) {
-        if (init && init.body) {
-          try {
-            const body = JSON.parse(init.body);
-            const overrides = readOverrides();
-            let changed = false;
-            for (const k in overrides) {
-              if (!Object.prototype.hasOwnProperty.call(overrides, k)) continue;
-              const v = overrides[k];
-              if (v === "" || v === null || v === undefined) continue;
-              body[k] = v;
-              changed = true;
-            }
-            const defaultEp = readDefaultEpisode();
-            if (defaultEp > 0 && (!body.start_episode || body.start_episode === 0)) {
-              body.start_episode = defaultEp;
-              changed = true;
-            }
-            if (changed) init.body = JSON.stringify(body);
-          } catch (e) {}
-        }
+      if (method === "POST" && url.indexOf("/subscribe") !== -1 && init && init.body &&
+          typeof init.body === "string" && init.body.charAt(0) === "{") {
+        const payload = JSON.parse(init.body);
+        if (mergeOverrides(payload)) init.body = JSON.stringify(payload);
       }
     } catch (e) {}
     return OrigFetch.apply(this, arguments);
   };
+
+  // Clear overrides right after the request that carried them succeeds.
+  (function watchOneShot() {
+    if (!window.XMLHttpRequest) return;
+    const OrigSend2 = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+      const xhr = this;
+      if (xhr.__mpMethod === "POST" && (xhr.__mpUrl || "").indexOf("/subscribe") !== -1) {
+        xhr.addEventListener("load", function () {
+          try { if (xhr.status >= 200 && xhr.status < 300) maybeOneShot(); }
+          catch (e) {}
+        });
+      }
+      return OrigSend2.call(this, body);
+    };
+  })();
 
   // ── DOM helpers ──
   function el(tag, props, children) {
@@ -371,12 +433,55 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
 
-    const panel = el("div", { [PANEL_MARKER]: "v11", class: "mp-sc-panel" });
+    const panel = el("div", { [PANEL_MARKER]: "v12", class: "mp-sc-panel" });
 
-    panel.appendChild(el("div", { class: "mp-sc-header" }, [
-      el("div", { class: "mp-sc-title", text: "订阅增强（SubscribeConfigurator）" }),
-      el("div", { class: "mp-sc-hint", text: "字段值保存到 localStorage，提交订阅时自动附加。可在订阅详情页继续编辑。" }),
-    ]));
+    // Header row: title + active-count badge + clear button
+    const header = el("div", { class: "mp-sc-header" });
+    const hrow = el("div", { class: "mp-sc-hrow" });
+
+    const activeCount = Object.keys(overrides).length + (defaultEp > 0 ? 1 : 0);
+    hrow.appendChild(el("div", {
+      class: "mp-sc-title",
+      text: "订阅增强（SubscribeConfigurator）",
+    }));
+    hrow.appendChild(el("span", {
+      class: "mp-sc-badge" + (activeCount ? " mp-sc-badge--on" : ""),
+      text: activeCount ? ("已填 " + activeCount + " 项") : "未填写",
+    }));
+
+    const clearBtn = el("button", { type: "button", class: "mp-sc-clear", text: "清空全部" });
+    clearBtn.addEventListener("click", function () {
+      clearOverrides();
+      try { localStorage.removeItem(LS_ONESHOT_KEY); } catch (e) {}
+      const stale = panel.querySelectorAll("[" + PANEL_MARKER + "]");
+      // re-render the panel body in place
+      const fresh = buildPanel();
+      panel.parentNode.replaceChild(fresh, panel);
+      console.info("[subscribeconfigurator v12] overrides cleared by user");
+    });
+    hrow.appendChild(clearBtn);
+    header.appendChild(hrow);
+
+    header.appendChild(el("div", {
+      class: "mp-sc-hint",
+      text: "字段值保存到 localStorage，提交订阅时自动附加。可在订阅详情页继续编辑。",
+    }));
+
+    // One-shot toggle
+    const osLabel = el("label", { class: "mp-sc-oneshot" });
+    const osInput = el("input", { type: "checkbox", class: "mp-sc-checkbox" });
+    osInput.checked = isOneShot();
+    osInput.addEventListener("change", function () {
+      try {
+        if (osInput.checked) localStorage.setItem(LS_ONESHOT_KEY, "1");
+        else localStorage.removeItem(LS_ONESHOT_KEY);
+      } catch (e) {}
+    });
+    osLabel.appendChild(osInput);
+    osLabel.appendChild(el("span", { text: "一次性（提交一次后自动清空）" }));
+    header.appendChild(osLabel);
+
+    panel.appendChild(header);
 
     // Tabs (basic / advance) mirroring MP's own layout
     const tabs = el("div", { class: "mp-sc-tabs" });
@@ -424,6 +529,12 @@
     ".mp-sc-header{margin-bottom:12px}",
     ".mp-sc-title{font-size:14px;font-weight:500;letter-spacing:.0125em;margin-bottom:4px;color:rgba(var(--v-theme-on-surface),var(--v-high-emphasis-opacity))}",
     ".mp-sc-hint{font-size:12px;line-height:1.5;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
+    ".mp-sc-hrow{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap}",
+    ".mp-sc-badge{font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(var(--v-theme-on-surface),.12);color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
+    ".mp-sc-badge--on{background:rgba(var(--v-theme-primary),.16);color:rgb(var(--v-theme-primary))}",
+    ".mp-sc-clear{margin-left:auto;background:none;border:1px solid rgba(var(--v-theme-on-surface),.38);border-radius:4px;padding:2px 10px;font:inherit;font-size:12px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;transition:border-color .15s,color .15s}",
+    ".mp-sc-clear:hover{border-color:rgb(var(--v-theme-primary));color:rgb(var(--v-theme-primary))}",
+    ".mp-sc-oneshot{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer}",
     ".mp-sc-tabs{display:flex;gap:8px;margin-bottom:16px;border-bottom:1px solid rgba(var(--v-theme-on-surface),var(--v-border-opacity))}",
     ".mp-sc-tabbtn{background:none;border:none;padding:8px 4px;margin-bottom:-1px;font:inherit;font-size:14px;font-weight:500;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}",
     ".mp-sc-tabbtn--active{color:rgb(var(--v-theme-primary));border-bottom-color:rgb(var(--v-theme-primary))}",
@@ -484,7 +595,7 @@
       injected += 1;
     });
     if (injected > 0) {
-      console.info("[subscribeconfigurator v11] injected into " + injected + " dialog(s)");
+      console.info("[subscribeconfigurator v12] injected into " + injected + " dialog(s)");
     }
   }
 
@@ -499,12 +610,12 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v11] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v12] loaded, MutationObserver active");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1) {
-      console.error("[subscribeconfigurator v11] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v12] SCRIPT ERROR", e.message, ":" + e.lineno);
     }
   });
 
@@ -512,6 +623,6 @@
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
   } catch (e) {
-    console.error("[subscribeconfigurator v11] FATAL on attach", e);
+    console.error("[subscribeconfigurator v12] FATAL on attach", e);
   }
 })();
