@@ -18,7 +18,7 @@
     "name": "订阅增强",
     "description": "在订阅添加对话框注入 start_episode / filter / include / exclude / quality / resolution / effect 字段，添加订阅时即可配置，避免「添加后立即下载、错过配置窗口」的问题。",
     "labels": "订阅,增强",
-    "version": "0.9.1",
+    "version": "0.9.2",
     "icon": "https://raw.githubusercontent.com/lyj324/MoviePilot-Plugins/main/icons/subscribeconfigurator.png",
     "author": "lyj324",
     "level": 1,
