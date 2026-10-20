@@ -27,7 +27,7 @@ class SubscribeConfigurator(_PluginBase):
     # ── 元数据 ──
     plugin_name = "订阅增强"
     plugin_desc = "在订阅添加对话框注入 start_episode / filter / quality 等字段，添加订阅时即可一次性配置。"
-    plugin_version = "0.3.0"
+    plugin_version = "0.9.0"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeconfigurator_"
