@@ -1,12 +1,11 @@
-/* SubscribeConfigurator — frontend patch v9
- * v9 changes vs v8:
- *   - VISUAL MATCH with MP native Vuetify v-text-field outlined variant:
- *     - bordered input (1px outline resting, 2px primary on focus)
- *     - floating label that rises + shrinks when focused or filled
- *     - background surface color on the floating label so the border is "cut" behind it
- *   - Panel itself styled as a v-card (rounded, surface bg, subtle border)
- *   - Field grid: 2-col on narrow, 3-col on wide (mimics v-row / v-col-md-4)
- *   - Per-skip-path diagnostic logs retained from v8
+/* SubscribeConfigurator — frontend patch v10
+ * v10 changes vs v9:
+ *   - quality / resolution / effect are now SELECT dropdowns with MP-native option
+ *     lists (extracted from MP frontend bundle: qualityOptions / resolutionOptions /
+ *     effectOptions) instead of free-text inputs, so users always pick legal values.
+ *     A "自定义…" escape hatch keeps free input available.
+ *   - Filter / include / exclude stay as free-text inputs (they are regex-capable).
+ *   - Rest of v9 visuals unchanged (outlined v-text-field, floating label, card).
  */
 (function () {
   "use strict";
@@ -90,6 +89,9 @@
   //   - label floats above border when focused or filled
   //   - surface bg on the label so it visually "cuts" the border
   function buildField(field, overrides, defaultEp) {
+    // dropdown-backed fields (quality / resolution / effect) render as selects
+    if (field.options) return buildSelectField(field, overrides);
+
     const wrap = el("div", { class: "mp-sc-field" });
 
     const cur = overrides[field.model];
@@ -139,14 +141,87 @@
     return wrap;
   }
 
+  // MP-native option lists, extracted verbatim from the MP v3 frontend bundle
+  // (index-*.js: qualityOptions / resolutionOptions / effectOptions). Using the exact
+  // strings MP's own v-autocomplete fields offer, so we never send illegal values.
+  const NATIVE_OPTIONS = {
+    quality: ["蓝光原盘", "Remux", "BluRay", "UHD", "WEB-DL", "HDTV", "H265", "H264"],
+    resolution: ["4k", "1080p", "720p"],
+    effect: ["杜比视界", "杜比全景声", "HDR", "SDR"],
+  };
+
+  // Select-backed field (quality / resolution / effect): a native <select> styled to
+  // match Vuetify v-autocomplete (outlined box + floating label + chevron).
+  // An empty first option mirrors MP's "全部" (no filter). A "自定义…" option reveals
+  // a free-text input for values outside the native list.
+  function buildSelectField(field, overrides) {
+    const wrap = el("div", { class: "mp-sc-field mp-sc-field--select" });
+    const cur = overrides[field.model];
+    const current = cur === undefined || cur === null ? "" : String(cur);
+    const isNative = current === "" || field.options.indexOf(current) !== -1;
+
+    const box = el("div", { class: "mp-sc-selectbox" });
+    const select = el("select", {
+      class: "mp-sc-select",
+      "data-mp-model": field.model,
+    });
+    select.appendChild(el("option", { value: "" }));
+    field.options.forEach(function (opt) {
+      select.appendChild(el("option", { value: opt, text: opt }));
+    });
+    select.appendChild(el("option", { value: "__custom__", text: "自定义…" }));
+    select.value = isNative ? current : "__custom__";
+
+    box.appendChild(select);
+    box.appendChild(el("label", { class: "mp-sc-label", text: field.label }));
+
+    const customWrap = el("div", { class: "mp-sc-custom", style: "display:none" });
+    const customInput = el("input", {
+      type: "text",
+      class: "mp-sc-input",
+      placeholder: "自定义值",
+      "data-mp-custom": field.model,
+      autocomplete: "off",
+    });
+    if (!isNative && current) customInput.value = current;
+    customWrap.appendChild(customInput);
+    wrap.appendChild(box);
+    wrap.appendChild(customWrap);
+
+    function commit(val) {
+      const next = readOverrides();
+      if (val === "" || val === "__custom__") delete next[field.model];
+      else next[field.model] = val;
+      writeOverrides(next);
+    }
+
+    select.addEventListener("change", function () {
+      const v = select.value;
+      if (v === "__custom__") {
+        customWrap.style.display = "block";
+        customInput.focus();
+        return;
+      }
+      customWrap.style.display = "none";
+      customInput.value = "";
+      commit(v);
+    });
+    customInput.addEventListener("input", function () {
+      commit(customInput.value.trim());
+    });
+
+    if (!isNative && current) customWrap.style.display = "block";
+    return wrap;
+  }
+
   const FIELDS = [
     { model: "start_episode", label: "开始集数", type: "number", placeholder: "0 = 不指定" },
     { model: "filter", label: "过滤规则", type: "text", placeholder: "空格分隔" },
     { model: "include", label: "包含关键词", type: "text", placeholder: "空格分隔" },
     { model: "exclude", label: "排除关键词", type: "text", placeholder: "空格分隔" },
-    { model: "quality", label: "质量", type: "text", placeholder: "BluRay WEB-DL" },
-    { model: "resolution", label: "分辨率", type: "text", placeholder: "1080p 2160p" },
-    { model: "effect", label: "特效", type: "text", placeholder: "HDR SDR" },
+    { model: "quality", label: "质量", type: "text", options: NATIVE_OPTIONS.quality },
+    { model: "resolution", label: "分辨率", type: "text", options: NATIVE_OPTIONS.resolution },
+    { model: "effect", label: "特效", type: "text", options: NATIVE_OPTIONS.effect },
   ];
 
   function buildPanel() {
@@ -155,7 +230,7 @@
 
     // Outer container — v-card-like (rounded surface bg + subtle border)
     const panel = el("div", {
-      [PANEL_MARKER]: "v9",
+      [PANEL_MARKER]: "v10",
       class: "mp-sc-panel",
     });
 
@@ -277,6 +352,57 @@
     "  margin-left: 12px;",
     "  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));",
     "}",
+    // ── Select (v-autocomplete look) ──
+    ".mp-sc-selectbox {",
+    "  position: relative;",
+    "  display: block;",
+    "}",
+    ".mp-sc-select {",
+    "  width: 100%;",
+    "  box-sizing: border-box;",
+    "  padding: 20px 32px 8px 12px;",
+    "  font: inherit;",
+    "  font-size: 14px;",
+    "  color: rgb(var(--v-theme-on-surface));",
+    "  background: transparent;",
+    "  border: 1px solid rgba(var(--v-theme-on-surface), 0.38);",
+    "  border-radius: 4px;",
+    "  outline: none;",
+    "  appearance: none;",
+    "  -webkit-appearance: none;",
+    "  cursor: pointer;",
+    "  transition: border-color 0.18s ease, border-width 0.18s ease;",
+    "}",
+    ".mp-sc-select:hover {",
+    "  border-color: rgba(var(--v-theme-on-surface), 0.6);",
+    "}",
+    ".mp-sc-select:focus {",
+    "  border-color: rgb(var(--v-theme-primary));",
+    "  border-width: 2px;",
+    "  padding: 19px 31px 7px 11px;",
+    "}",
+    ".mp-sc-select:invalid, .mp-sc-select option[value=''] { color: rgba(var(--v-theme-on-surface), 0.6); }",
+    // chevron affordance (v-autocomplete append icon)
+    ".mp-sc-selectbox::after {",
+    "  content: '';",
+    "  position: absolute;",
+    "  right: 12px;",
+    "  top: 50%;",
+    "  width: 7px;",
+    "  height: 7px;",
+    "  margin-top: -6px;",
+    "  border-right: 2px solid rgba(var(--v-theme-on-surface), 0.6);",
+    "  border-bottom: 2px solid rgba(var(--v-theme-on-surface), 0.6);",
+    "  transform: rotate(45deg);",
+    "  pointer-events: none;",
+    "}",
+    // select always has a value slot, so its label is always floated
+    ".mp-sc-selectbox .mp-sc-label { top: 8px; font-size: 12px; }",
+    ".mp-sc-select:focus ~ .mp-sc-label,",
+    ".mp-sc-selectbox:hover .mp-sc-label {",
+    "  color: rgb(var(--v-theme-primary));",
+    "}",
+    ".mp-sc-custom { margin-top: 6px; }",
   ].join("\n");
 
   // v9: precise submit-button match. Diagnostic logs only carry non-sensitive
@@ -297,11 +423,11 @@
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
       if (text.indexOf("开始集数") !== -1) {
-        console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 开始集数)");
+        console.info("[sc v10] dialog #" + idx + " skip: edit dialog (has 开始集数)");
         return;
       }
       if (text.indexOf("总集数") !== -1) {
-        console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 总集数)");
+        console.info("[sc v10] dialog #" + idx + " skip: edit dialog (has 总集数)");
         return;
       }
       const btns = dialog.querySelectorAll("button, .v-btn");
@@ -312,20 +438,20 @@
           isAdd = true;
         }
         if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) {
-          console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 保存 + 编辑订阅)");
+          console.info("[sc v10] dialog #" + idx + " skip: edit dialog (has 保存 + 编辑订阅)");
           return;
         }
       }
       if (!isAdd) {
         // Log only the index + reason, not the DOM text or button labels.
-        console.info("[sc v9] dialog #" + idx + " skip: no add-subscribe button found");
+        console.info("[sc v10] dialog #" + idx + " skip: no add-subscribe button found");
         return;
       }
       const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
-      console.info("[subscribeconfigurator v9] injected into " + injected + " dialog(s)");
+      console.info("[subscribeconfigurator v10] injected into " + injected + " dialog(s)");
     });
   }
 
@@ -340,12 +466,12 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v9] loaded, MutationObserver active");
+    console.info("[subscribeconfigurator v10] loaded, MutationObserver active");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1) {
-      console.error("[subscribeconfigurator v9] SCRIPT ERROR", e.message, e.filename, ":" + e.lineno);
+      console.error("[subscribeconfigurator v10] SCRIPT ERROR", e.message, e.filename, ":" + e.lineno);
     }
   });
 
@@ -356,6 +482,6 @@
       attach();
     }
   } catch (e) {
-    console.error("[subscribeconfigurator v9] FATAL on attach", e);
+    console.error("[subscribeconfigurator v10] FATAL on attach", e);
   }
 })();
