@@ -268,6 +268,7 @@
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); doOpen(); }
     });
     wrap.appendChild(anchor);
+    if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
     return wrap;
   }
 
@@ -318,6 +319,7 @@
     }
     anchor.addEventListener("click", doOpen);
     wrap.appendChild(anchor);
+    if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
 
     fetch(API_BASE + field.api, { credentials: "same-origin" })
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
@@ -393,18 +395,21 @@
   };
 
   const BASIC_FIELDS = [
-    { model: "keyword", kind: "text", type: "text", icon: ICONS.search, hint: "指定搜索站点时使用的关键词" },
-    { model: "total_episode", kind: "text", type: "number", icon: ICONS.list, hint: "剧集总集数" },
-    { model: "start_episode", kind: "text", type: "number", icon: ICONS.play, hint: "0 = 不指定" },
-    { model: "quality", kind: "dropdown", options: NATIVE_OPTIONS.quality, icon: ICONS.hd },
-    { model: "resolution", kind: "dropdown", options: NATIVE_OPTIONS.resolution, icon: ICONS.monitor },
-    { model: "effect", kind: "dropdown", options: NATIVE_OPTIONS.effect, icon: ICONS.wand },
-    { model: "sites", kind: "async-dropdown", api: "/site", icon: ICONS.globe, multi: true,
-      placeholder: "全部", mapItem: function (s) { return { value: s.name, label: s.name }; } },
-    { model: "downloader", kind: "async-dropdown", api: "/download/clients", icon: ICONS.download,
-      placeholder: "跟随系统", mapItem: function (d) { return { value: d.name, label: d.name }; } },
-    { model: "save_path", kind: "text", type: "text", icon: ICONS.folder, hint: "留空自动使用下载目录" },
-    { model: "search_interval", kind: "dropdown", icon: ICONS.timer, placeholder: "跟随系统",
+    { model: "keyword", label: "搜索关键词", kind: "text", type: "text", icon: ICONS.search, hint: "指定搜索站点时使用的关键词" },
+    { model: "total_episode", label: "总集数", kind: "text", type: "number", icon: ICONS.list, hint: "剧集总集数" },
+    { model: "start_episode", label: "开始集数", kind: "text", type: "number", icon: ICONS.play, hint: "0 = 不指定" },
+    { model: "quality", label: "质量", kind: "dropdown", options: NATIVE_OPTIONS.quality, icon: ICONS.hd, hint: "订阅资源质量" },
+    { model: "resolution", label: "分辨率", kind: "dropdown", options: NATIVE_OPTIONS.resolution, icon: ICONS.monitor, hint: "订阅资源分辨率" },
+    { model: "effect", label: "特效", kind: "dropdown", options: NATIVE_OPTIONS.effect, icon: ICONS.wand, hint: "订阅资源特效" },
+    { model: "sites", label: "订阅站点", kind: "async-dropdown", api: "/site", icon: ICONS.globe, multi: true,
+      placeholder: "全部", hint: "订阅的站点范围，不选使用系统设置",
+      mapItem: function (s) { return { value: s.name, label: s.name }; } },
+    { model: "downloader", label: "下载器", kind: "async-dropdown", api: "/download/clients", icon: ICONS.download,
+      placeholder: "跟随系统", hint: "指定该订阅使用的下载器",
+      mapItem: function (d) { return { value: d.name, label: d.name }; } },
+    { model: "save_path", label: "保存路径", kind: "text", type: "text", icon: ICONS.folder, hint: "指定该订阅的下载保存路径，留空自动使用设定的下载目录" },
+    { model: "search_interval", label: "搜索周期", kind: "dropdown", icon: ICONS.timer, placeholder: "跟随系统",
+      hint: "仅在开启订阅定时搜索时生效；手动搜索和 RSS 刷新不受影响",
       options: ["6", "12", "24", "48", "72", "168"],
       optionLabel: function (v) { return v + " 小时"; } },
   ];
@@ -414,14 +419,15 @@
     { model: "search_imdbid", label: "使用 ImdbID 搜索", hint: "精确搜索资源" },
   ];
   const ADVANCE_FIELDS = [
-    { model: "filter", kind: "text", type: "text", icon: ICONS.filter, hint: "空格分隔（MP schema 字段，原生 UI 未暴露）" },
-    { model: "include", kind: "text", type: "text", icon: ICONS.plus, hint: "关键字 / 正则，空格分隔" },
-    { model: "exclude", kind: "text", type: "text", icon: ICONS.minus, hint: "关键字 / 正则，空格分隔" },
-    { model: "season", kind: "dropdown", options: NATIVE_OPTIONS.season, icon: ICONS.list,
+    { model: "filter", label: "过滤规则", kind: "text", type: "text", icon: ICONS.filter, hint: "空格分隔（MP schema 字段，原生 UI 未暴露）" },
+    { model: "include", label: "包含", kind: "text", type: "text", icon: ICONS.plus, hint: "包含规则，支持关键字 / 正则表达式" },
+    { model: "exclude", label: "排除", kind: "text", type: "text", icon: ICONS.minus, hint: "排除规则，支持关键字 / 正则表达式" },
+    { model: "season", label: "指定季", kind: "dropdown", options: NATIVE_OPTIONS.season, icon: ICONS.list,
+      hint: "指定任意季订阅",
       optionLabel: function (v) { return v === "0" ? "特别篇" : "第 " + v + " 季"; } },
-    { model: "episode_group", kind: "text", type: "text", hint: "按特定剧集组识别和刮削" },
-    { model: "media_category", kind: "text", type: "text", hint: "留空自动识别" },
-    { model: "custom_words", kind: "text", type: "text", hint: "自定义下载过滤词" },
+    { model: "episode_group", label: "剧集组", kind: "text", type: "text", hint: "按特定剧集组识别和刮削" },
+    { model: "media_category", label: "自定义类别", kind: "text", type: "text", hint: "指定类别名称，留空自动识别" },
+    { model: "custom_words", label: "自定义词", kind: "text", type: "text", hint: "自定义下载过滤词" },
   ];
 
   function buildPanel() {
