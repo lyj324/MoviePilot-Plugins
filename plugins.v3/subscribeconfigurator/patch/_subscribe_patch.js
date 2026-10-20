@@ -279,7 +279,9 @@
     "}",
   ].join("\n");
 
-  // v9: precise submit-button match + diagnostic logs for every skip path.
+  // v9: precise submit-button match. Diagnostic logs only carry non-sensitive
+  // identifiers (dialog index + static reason) — never DOM text — so user-shared
+  // console screenshots don't leak subscription/resource titles.
   function tryInject(root) {
     if (!root || typeof root.querySelectorAll !== "function") return;
     const candidates = root.querySelectorAll(
@@ -295,45 +297,36 @@
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
       if (text.indexOf("开始集数") !== -1) {
-        console.info("[sc v9] dialog #" + idx + " skip: contains 开始集数 (edit dialog)");
+        console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 开始集数)");
         return;
       }
       if (text.indexOf("总集数") !== -1) {
-        console.info("[sc v9] dialog #" + idx + " skip: contains 总集数 (edit dialog)");
+        console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 总集数)");
         return;
       }
       const btns = dialog.querySelectorAll("button, .v-btn");
-      const btnTexts = [];
       let isAdd = false;
       for (let i = 0; i < btns.length; i++) {
         const btnText = (btns[i].textContent || "").trim();
-        btnTexts.push(btnText);
         if (/^提交订阅$|^添加订阅$|^新增订阅$|^请选择订阅季$/.test(btnText)) {
           isAdd = true;
         }
-        if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) return;
+        if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) {
+          console.info("[sc v9] dialog #" + idx + " skip: edit dialog (has 保存 + 编辑订阅)");
+          return;
+        }
       }
       if (!isAdd) {
-        console.info(
-          "[sc v9] dialog #" + idx + " skip: no add button. buttons:",
-          btnTexts,
-          "text snippet:", text.substring(0, 80).replace(/\s+/g, " ")
-        );
+        // Log only the index + reason, not the DOM text or button labels.
+        console.info("[sc v9] dialog #" + idx + " skip: no add-subscribe button found");
         return;
       }
       const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
-      console.info(
-        "[subscribeconfigurator v9] INJECTED into add dialog #" + idx,
-        "buttons:", btnTexts,
-        "text snippet:", text.substring(0, 80).replace(/\s+/g, " ")
-      );
+      console.info("[subscribeconfigurator v9] injected into " + injected + " dialog(s)");
     });
-    if (injected > 0) {
-      console.info("[subscribeconfigurator v9] injected into", injected, "dialog(s)");
-    }
   }
 
   function attach() {
