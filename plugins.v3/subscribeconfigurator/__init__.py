@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.plugins import _PluginBase
@@ -35,9 +36,14 @@ class SubscribeConfigurator(_PluginBase):
     auth_level = 1
 
     # ── 常量 ──
+    # Marker format: includes plugin version so init_plugin can detect
+    # "already patched with THIS version" vs "patched with an older version"
+    # and force-repatch on upgrade. (v1 just changed marker string is fine.)
     PATCH_MARKER = "<!-- mp-subscribeconfigurator-patch v3 -->"
     PATCH_SCRIPT_FILENAME = "_subscribe_patch.js"
     BACKUP_SUFFIX = ".subscribeconfigurator.bak"
+    # Regex captures `sc=vX.Y.Z` so we can parse current version from index.html
+    _SC_VERSION_RE = re.compile(r"sc=v([\d.]+)")
 
     # 容器内路径（默认 MP v3 frontend baked 在 /public）
     PUBLIC_DIR = "/public"
@@ -82,9 +88,34 @@ class SubscribeConfigurator(_PluginBase):
             logger.warn(f"SubscribeConfigurator: 读 index.html 失败：{err}")
             return
 
-        if self.PATCH_MARKER in content:
-            logger.info("SubscribeConfigurator: 已 patch（marker 存在），跳过")
+        # Detect current patch version in index.html (sc=vX.Y.Z) so we know
+        # whether it's up-to-date OR needs (re)patch on plugin upgrade.
+        m = self._SC_VERSION_RE.search(content)
+        current_sc_version = m.group(1) if m else None
+        if current_sc_version == self.plugin_version:
+            logger.info(
+                "SubscribeConfigurator: index.html 已是当前版本 (sc=v%s)，跳过",
+                self.plugin_version,
+            )
             return
+        if current_sc_version:
+            logger.info(
+                "SubscribeConfigurator: index.html 是旧版本 (sc=v%s)，plugin 当前 v%s → 重新 patch",
+                current_sc_version,
+                self.plugin_version,
+            )
+        # else: no marker at all → fresh patch below
+
+        # Strip any older subscribeconfigurator marker/script (any version) so
+        # we don't accumulate stale blocks if a previous plugin version was
+        # partially cleaned up.
+        old_strip = re.compile(
+            r'<script defer src="/_subscribe_patch\.js(?:\?[^"]*)?"\s*></script>\s*\n?'
+            r'|'
+            r'<!--\s*mp-subscribeconfigurator-patch\s+v\d+(?:\s*\(sc=v[\d.]+\))?\s*-->',
+            re.MULTILINE,
+        )
+        content = old_strip.sub("", content)
 
         try:
             self._write_patch_js()
@@ -238,12 +269,16 @@ class SubscribeConfigurator(_PluginBase):
         with open(bak, "w", encoding="utf-8") as f:
             f.write(content)
 
-        # cache-bust query 强制浏览器每次重新拿 patch.js（nginx 给 /public/*.js 设了 30d 缓存）
+        # cache-bust ts + plugin version in script src so browser always refetches
+        # AND so init_plugin can detect "already-current" via sc= match.
         import time as _time
         cache_bust = int(_time.time())
+        # Strip any inline comment characters from plugin_version to keep
+        # the HTML comment safe (plugin_version is "0.9.1" style, but defensive)
+        safe_ver = re.sub(r"[^0-9A-Za-z._-]", "", self.plugin_version) or "0"
         script_tag = (
-            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}?v={cache_bust}"></script>\n'
-            f"{self.PATCH_MARKER}"
+            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}?v={cache_bust}&sc={safe_ver}"></script>\n'
+            f"{self.PATCH_MARKER} (sc=v{safe_ver})"
         )
         if "</head>" in content:
             new_content = content.replace("</head>", f"{script_tag}\n</head>", 1)
