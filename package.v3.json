@@ -18,26 +18,21 @@
     "name": "订阅增强",
     "description": "在订阅添加对话框注入与 MP 原生「编辑订阅」等价的基础/进阶配置字段（关键词、总集数、开始集数、质量、分辨率、特效、订阅站点、下载器、洗版开关、包含/排除、指定季、剧集组、自定义类别等），添加订阅时即可配置，避免「添加后立即下载、错过配置窗口」的问题。",
     "labels": "订阅,增强",
-    "version": "0.12.0",
+    "version": "0.13.0",
     "icon": "https://raw.githubusercontent.com/lyj324/MoviePilot-Plugins/main/icons/subscribeconfigurator.png",
     "author": "lyj324",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v0.13.0": "样式对齐：放弃原生 <select>（其弹层由操作系统渲染，CSS 无法着色，在深色 dialog 上表现为与背景同色），改为自绘下拉框 + 菜单 teleport 到 body 并用 fixed 定位（避免被 dialog overflow 裁剪）；开关移到独立整行（修复标签折行）；补齐原生缺失字段（保存路径 / 搜索周期）；图标使用 MP 原生 mdi path；search_interval/season 等按后端 schema 转成整数。",
       "v0.12.0": "修复关键 bug：MP 前端使用 axios（XMLHttpRequest 适配器），此前挂在 window.fetch 上的拦截器从未触发，覆盖字段一次都没写进订阅 POST。v12 改为在 XMLHttpRequest.prototype.open/send 层拦截。另新增「清空全部」按钮、已填项数徽标、「一次性（提交后自动清空）」开关。",
-      "v0.11.0": "patch v11：对齐 MP 原生 EditDialog 的基础 + 进阶双 tab。基础 tab：搜索关键词/总集数/开始集数/质量/分辨率/特效（静态选项）/订阅站点（GET /site 动态多选）/下载器（GET /download/clients 动态单选）/洗版/全集洗版/使用 ImdbID 搜索（开关）。进阶 tab：过滤规则/包含/排除/指定季（0-100 静态选项）/剧集组/自定义类别/自定义过滤词。动态字段异步加载并在 API 失败时降级为输入框，不阻塞 UI。",
-      "v0.10.0": "patch v10：quality / resolution / effect 改为下拉选框，选项取自 MP 前端 bundle 的原生 qualityOptions/resolutionOptions/effectOptions（蓝光原盘/Remux/BluRay/UHD/WEB-DL/HDTV/H265/H264、4k/1080p/720p、杜比视界/杜比全景声/HDR/SDR），另提供「自定义…」保留自由输入；filter/include/exclude 保持输入框（支持正则）。",
-      "v0.9.1": "patch v9 security fix：移除 console.info 中 button text + dialog text snippet（不再外泄 DOM 文本到用户控制台截图）",
-      "v0.9.0": "patch v9：完整模仿 Vuetify outlined v-text-field 风格——1px border resting / 2px primary on focus / 浮动 label（focus 或 fill 时上浮缩字）/ v-card 圆角容器 / CSS Grid 响应式 1-2-3 列。",
-      "v0.8.0": "patch v8: 详细诊断 console log（每个 skip 路径都列原因 + 按钮 text + dialog text snippet）",
-      "v0.7.0": "patch v7: 匹配'请选择订阅季'按钮（第一步 add dialog 也注入）",
-      "v0.6.0": "patch v6: 精确按钮匹配 (提交订阅/添加订阅)，跳过编辑 dialog",
-      "v0.5.0": "patch v5: 收紧 selector (跳过 v-card-link plugin cards)",
-      "v0.4.0": "patch v4: 超宽 selector（已废弃，太宽误注入 plugin cards）",
-      "v0.3.0": "修复 plugin 升级后 patch 失效：script src 永久加 cache-bust timestamp（避免 nginx 30d 缓存命中旧 patch.js）；marker 升到 v3。",
-      "v0.2.0": "patch v3：精确 selector 只注入一次（修复 v2 的 dialog 内+外双注入）；跳过编辑订阅 dialog（避免与原生字段重复）；style 模仿 Vuetify outlined VTextField 暗色主题。",
-      "v0.1.0": "初版：init_plugin 时把劫持脚本写入 /public/_subscribe_patch.js；在 /public/index.html 注入 <script> 引用；停止时还原。"
+      "v0.11.0": "对齐 MP 原生 EditDialog 的基础 + 进阶双 tab。基础 tab：搜索关键词/总集数/开始集数/质量/分辨率/特效（静态选项）/订阅站点（GET /site 动态多选）/下载器（GET /download/clients 动态单选）/洗版/全集洗版/使用 ImdbID 搜索（开关）。进阶 tab：过滤规则/包含/排除/指定季（0-100 静态选项）/剧集组/自定义类别/自定义过滤词。动态字段异步加载并在 API 失败时降级为输入框。",
+      "v0.10.0": "quality / resolution / effect 改为下拉选框，选项取自 MP 前端 bundle 的原生 qualityOptions/resolutionOptions/effectOptions（蓝光原盘/Remux/BluRay/UHD/WEB-DL/HDTV/H265/H264、4k/1080p/720p、杜比视界/杜比全景声/HDR/SDR），另提供「自定义…」保留自由输入。",
+      "v0.9.2": "plugin_version 感知的重新 patch：init_plugin 解析 index.html 里的 sc=vX.Y.Z，版本不一致时强制重写（修复 plugin 升级后 patch 未生效）。",
+      "v0.9.1": "安全修复：移除 console.info 中的 button text / dialog text snippet，避免 DOM 文本随控制台截图外泄。",
+      "v0.9.0": "模仿 Vuetify outlined v-text-field：outlined 边框、浮动 label、v-card 圆角容器、响应式 grid。",
+      "v0.1.0": "初版：init_plugin 把劫持脚本写入 /public/_subscribe_patch.js 并在 /public/index.html 注入 script 引用；stop_service 还原。"
     }
   }
 }
