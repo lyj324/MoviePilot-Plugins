@@ -1,14 +1,15 @@
-/* SubscribeConfigurator — frontend patch v15
- * v15 fixes:
- *   1. Honor server config (`window.__MP_SC_CONFIG__`) for default start episode /
- *      auto-apply; v14 only read localStorage, which nothing ever wrote.
- *   2. Multi-select read-modify-write from localStorage on every click; v14 reused
- *      a stale snapshot, so selecting A then B stored only B.
- *   3. Downloader is single-select (schema expects a string); sites stays multi.
- *   4. Failed async option load now opens a real manual prompt instead of an empty
- *      menu with only "clear".
- *   5. Guardrails: whitelist fields, normalize types, one-shot defaults ON, 401 hint,
- *      option cache, debounced observer, keep a live panel on re-scan.
+/* SubscribeConfigurator — frontend patch v16
+ * v16 fixes:
+ *   1. Site options load from `GET /site/rss` (the endpoint the native
+ *      subscribe dialog uses), falling back to `/site/` and `/site` for older
+ *      builds. `/site` alone needs manage permission, so normal users saw
+ *      "加载失败" even though the native dialog worked.
+ *   2. Site option values are numeric site IDs. `Subscribe.sites` is
+ *      `List[int]`; v15 stored names, which the backend rejected with 422.
+ *   3. Manual fallback accepts site names or IDs, resolves names against the
+ *      loaded/cached site list, and never sends unresolved names as IDs.
+ *   4. Failure state offers "重试加载" and "手动输入" instead of only a prompt.
+ *   5. Display selected sites by name, not by raw ID.
  */
 (function () {
   "use strict";
@@ -16,8 +17,9 @@
   const LS_OVERRIDES_KEY = "mp_subscribe_overrides";
   const LS_DEFAULT_EPISODE_KEY = "mp_subscribe_default_start_episode";
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
+  const LS_SITE_ITEMS_KEY = "mp_sc_site_items";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
-  const PANEL_VERSION = "v15";
+  const PANEL_VERSION = "v16";
   const API_BASE = "/api/v1";
   const OPTION_TTL_MS = 5 * 60 * 1000;
   const OPTION_CACHE = {};
@@ -51,26 +53,48 @@
 
   // Raw option lists change rarely (sites / downloaders). Cache the parsed
   // array for a few minutes so opening the dialog repeatedly doesn't hammer
-  // /api/v1/site every time.
-  function apiGetCached(path) {
+  // the API. `fallbacks` lets us try the native endpoint first and older MP
+  // variants afterwards.
+  function apiGetCached(path, fallbacks) {
     const now = Date.now();
     const hit = OPTION_CACHE[path];
     if (hit && now - hit.at < OPTION_TTL_MS) return Promise.resolve(hit.data);
-    return apiGet(path)
-      .then(function (r) {
-        if (!r.ok) {
-          const err = new Error("http " + r.status);
-          err.status = r.status;
-          throw err;
-        }
-        return r.json();
-      })
-      .then(function (json) {
-        const data = json && json.data !== undefined ? json.data : json;
-        const arr = Array.isArray(data) ? data : [];
-        OPTION_CACHE[path] = { at: now, data: arr };
-        return arr;
-      });
+    const paths = [path].concat(fallbacks || []);
+    function attempt(index, lastError) {
+      if (index >= paths.length) return Promise.reject(lastError || new Error("no endpoint"));
+      return apiGet(paths[index])
+        .then(function (r) {
+          if (!r.ok) {
+            const err = new Error("http " + r.status);
+            err.status = r.status;
+            throw err;
+          }
+          return r.json();
+        })
+        .then(function (json) {
+          const data = json && json.data !== undefined ? json.data : json;
+          const arr = Array.isArray(data) ? data : [];
+          OPTION_CACHE[path] = { at: now, data: arr };
+          return arr;
+        })
+        .catch(function (err) {
+          return attempt(index + 1, err);
+        });
+    }
+    return attempt(0, null);
+  }
+
+  // Keep the last good site list so the manual fallback can still turn a site
+  // name into the numeric ID the backend expects when the API is temporarily
+  // unavailable.
+  function cacheSiteItems(items) {
+    try { localStorage.setItem(LS_SITE_ITEMS_KEY, JSON.stringify(items)); } catch (e) {}
+  }
+  function readCachedSiteItems() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LS_SITE_ITEMS_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
   }
 
   function readOverrides() {
@@ -116,13 +140,14 @@
 
   function normalizeOverride(model, value) {
     if (model === "sites") {
-      if (Array.isArray(value)) {
-        return value.map(function (x) { return String(x).trim(); }).filter(Boolean);
-      }
-      if (typeof value === "string" && value.trim()) {
-        return value.split(/[,，\s]+/).map(function (x) { return x.trim(); }).filter(Boolean);
-      }
-      return [];
+      // `Subscribe.sites` is List[int]. Drop old name-based values instead of
+      // sending them to the backend, where Pydantic would reject the POST.
+      const raw = Array.isArray(value)
+        ? value
+        : (typeof value === "string" && value.trim() ? value.split(/[,，\s]+/) : []);
+      return raw
+        .map(function (x) { return parseInt(x, 10); })
+        .filter(function (n) { return !isNaN(n); });
     }
     if (model === "downloader") {
       if (Array.isArray(value)) return value.length ? String(value[0]).trim() : "";
@@ -165,7 +190,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v15] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v16] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -187,7 +212,7 @@
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
             merged = true;
-            console.info("[subscribeconfigurator v15] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v16] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -408,38 +433,123 @@
     let loaded = false;
     let failed = false;
 
+    function sameValue(a, b) { return String(a) === String(b); }
+
+    function siteLabel(value) {
+      if (field.model !== "sites") return String(value);
+      const list = items.length ? items : readCachedSiteItems();
+      for (let i = 0; i < list.length; i++) {
+        if (sameValue(list[i].value, value)) return list[i].label;
+      }
+      return String(value);
+    }
+
     function refresh() {
       const ov = readOverrides();
       const v = ov[field.model];
       const sel = Array.isArray(v) ? v : (v ? [String(v)] : []);
-      valEl.textContent = sel.length
-        ? (sel.length > 2 ? sel.slice(0, 2).join("、") + " 等 " + sel.length + " 项" : sel.join("、"))
+      const labels = sel.map(siteLabel);
+      valEl.textContent = labels.length
+        ? (labels.length > 2 ? labels.slice(0, 2).join("、") + " 等 " + labels.length + " 项" : labels.join("、"))
         : (field.placeholder || "全部");
       valEl.classList.toggle("mp-sc-dd__value--ph", !sel.length);
+    }
+
+    function siteValueFromToken(token) {
+      const text = String(token).trim();
+      if (!text) return null;
+      if (/^\d+$/.test(text)) return parseInt(text, 10);
+      const list = items.length ? items : readCachedSiteItems();
+      const lower = text.toLowerCase();
+      for (let i = 0; i < list.length; i++) {
+        if (String(list[i].label).trim().toLowerCase() === lower || sameValue(list[i].value, text)) {
+          const value = parseInt(list[i].value, 10);
+          return isNaN(value) ? null : value;
+        }
+      }
+      return null;
     }
 
     function promptManual() {
       const ov = readOverrides();
       const raw = ov[field.model];
-      const initial = Array.isArray(raw) ? raw.join(",")
-        : (raw === undefined || raw === null ? "" : String(raw));
+      const current = Array.isArray(raw) ? raw : (raw ? [String(raw)] : []);
+      const initial = current.map(siteLabel).join(",");
       const val = window.prompt(
-        "手动输入「" + field.label + "」" + (isMulti ? "（多个用逗号分隔）" : ""),
+        "手动输入「" + field.label + "」" +
+        (isMulti ? "：可填站点名称或 ID，多个用逗号分隔。" : "。"),
         initial
       );
       if (val === null) return;
-      const trimmed = val.trim();
-      if (isMulti) {
-        commitValue(field.model, trimmed ? trimmed.split(/[,，\s]+/).filter(Boolean) : "");
-      } else {
-        commitValue(field.model, trimmed);
+      const tokens = val.trim() ? val.trim().split(/[,，\s]+/).filter(Boolean) : [];
+      if (!tokens.length) { commitValue(field.model, ""); refresh(); return; }
+      if (!isMulti) {
+        commitValue(field.model, field.model === "sites" ? siteValueFromToken(tokens[0]) : tokens[0]);
+        refresh();
+        return;
       }
+      const values = [];
+      const unresolved = [];
+      tokens.forEach(function (token) {
+        const value = siteValueFromToken(token);
+        if (value === null || isNaN(value)) unresolved.push(token);
+        else if (values.indexOf(value) === -1) values.push(value);
+      });
+      if (unresolved.length) {
+        const list = items.length ? items : readCachedSiteItems();
+        const valid = list.slice(0, 40).map(function (it) {
+          return "  " + it.label + " (" + it.value + ")";
+        }).join("\n");
+        window.alert(
+          "无法识别：" + unresolved.join("、") +
+          (valid ? "\n\n可选站点：\n" + valid : "\n\n请填写站点 ID（数字）。")
+        );
+        return;
+      }
+      commitValue(field.model, values.length ? values : "");
       refresh();
+    }
+
+    function load() {
+      failed = false;
+      loaded = false;
+      anchor.classList.add("mp-sc-dd__field--loading");
+      valEl.classList.remove("mp-sc-dd__value--ph");
+      valEl.textContent = "加载中…";
+      apiGetCached(field.api, field.apiFallbacks)
+        .then(function (data) {
+          const rows = field.filterItem ? data.filter(field.filterItem) : data;
+          items = rows.map(field.mapItem).filter(function (it) {
+            return it && it.value !== undefined && it.value !== null && it.value !== "";
+          });
+          if (field.model === "sites") cacheSiteItems(items);
+          loaded = true;
+          failed = false;
+          anchor.classList.remove("mp-sc-dd__field--loading");
+          refresh();
+        })
+        .catch(function (err) {
+          failed = true;
+          loaded = true;
+          anchor.classList.remove("mp-sc-dd__field--loading");
+          valEl.textContent = (err && err.status === 401)
+            ? "登录已过期，点此重试/手填"
+            : "加载失败，点此重试/手填";
+          valEl.classList.add("mp-sc-dd__value--ph");
+          console.warn("[subscribeconfigurator v16] load " + field.api + " failed", err && err.status);
+        });
     }
 
     function doOpen(ev) {
       if (ev) ev.stopPropagation();
-      if (failed) { promptManual(); return; }
+      if (failed) {
+        openDropdown(anchor, [
+          { label: "重试加载", selected: false, onSelect: function () { load(); return false; } },
+          { label: isMulti ? "手动输入（名称或 ID）" : "手动输入", selected: false,
+            onSelect: function () { promptManual(); return false; } },
+        ], { refresh: refresh });
+        return;
+      }
       if (!loaded) return;
       const ov = readOverrides();
       const v = ov[field.model];
@@ -447,7 +557,7 @@
       const menuItems = items.map(function (it) {
         return {
           label: it.label,
-          selected: sel.indexOf(it.value) !== -1,
+          selected: sel.some(function (x) { return sameValue(x, it.value); }),
           onSelect: function () {
             // Re-read on every click. v14 captured `sel` once, so choosing A
             // then B wrote only B.
@@ -455,13 +565,16 @@
             const raw = now[field.model];
             if (isMulti) {
               const next = Array.isArray(raw) ? raw.slice() : (raw ? [String(raw)] : []);
-              const i = next.indexOf(it.value);
+              let i = -1;
+              for (let n = 0; n < next.length; n++) {
+                if (sameValue(next[n], it.value)) { i = n; break; }
+              }
               if (i === -1) next.push(it.value); else next.splice(i, 1);
               commitValue(field.model, next.length ? next : "");
               return i === -1;
             }
             const currentVal = raw === undefined || raw === null ? "" : String(raw);
-            const same = currentVal === it.value;
+            const same = sameValue(currentVal, it.value);
             commitValue(field.model, same ? "" : it.value);
             return !same;
           },
@@ -472,28 +585,20 @@
         selected: sel.length === 0,
         onSelect: function () { commitValue(field.model, ""); return false; },
       });
+      if (field.model === "sites") {
+        menuItems.splice(1, 0, {
+          label: "手动输入…",
+          selected: false,
+          onSelect: function () { closeOpenMenu(); promptManual(); return false; },
+        });
+      }
       openDropdown(anchor, menuItems, { multi: isMulti, refresh: refresh });
     }
     anchor.addEventListener("click", doOpen);
     wrap.appendChild(anchor);
     if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
 
-    apiGetCached(field.api)
-      .then(function (data) {
-        items = data.map(field.mapItem);
-        loaded = true;
-        anchor.classList.remove("mp-sc-dd__field--loading");
-        refresh();
-      })
-      .catch(function (err) {
-        failed = true;
-        loaded = true;
-        anchor.classList.remove("mp-sc-dd__field--loading");
-        valEl.textContent = (err && err.status === 401)
-          ? "登录已过期，点此手填"
-          : "加载失败，点此手填";
-        valEl.classList.add("mp-sc-dd__value--ph");
-      });
+    load();
     refresh();
     return wrap;
   }
@@ -558,9 +663,14 @@
     { model: "quality", label: "质量", kind: "dropdown", options: NATIVE_OPTIONS.quality, icon: ICONS.hd, hint: "订阅资源质量" },
     { model: "resolution", label: "分辨率", kind: "dropdown", options: NATIVE_OPTIONS.resolution, icon: ICONS.monitor, hint: "订阅资源分辨率" },
     { model: "effect", label: "特效", kind: "dropdown", options: NATIVE_OPTIONS.effect, icon: ICONS.wand, hint: "订阅资源特效" },
-    { model: "sites", label: "订阅站点", kind: "async-dropdown", api: "/site", icon: ICONS.globe, multi: true,
+    { model: "sites", label: "订阅站点", kind: "async-dropdown", api: "/site/rss",
+      apiFallbacks: ["/site/", "/site"], icon: ICONS.globe, multi: true,
       placeholder: "全部", hint: "订阅的站点范围，不选使用系统设置",
-      mapItem: function (s) { return { value: s.name, label: s.name }; } },
+      filterItem: function (s) {
+        return s && (s.is_active === undefined || s.is_active === null ||
+          s.is_active === true || s.is_active === 1 || s.is_active === "1");
+      },
+      mapItem: function (s) { return { value: Number(s.id), label: s.name }; } },
     { model: "downloader", label: "下载器", kind: "async-dropdown", api: "/download/clients", icon: ICONS.download,
       placeholder: "跟随系统", hint: "指定该订阅使用的下载器",
       mapItem: function (d) { return { value: d.name, label: d.name }; } },
@@ -606,7 +716,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v15] overrides cleared by user");
+      console.info("[subscribeconfigurator v16] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     header.appendChild(hrow);
@@ -766,7 +876,7 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v15] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v16] injected into " + injected + " dialog(s)");
   }
 
   let injectTimer = null;
@@ -795,16 +905,16 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v15] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v16] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v15] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v16] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v15] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v16] FATAL", e); }
 })();
