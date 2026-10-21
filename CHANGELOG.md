@@ -14,7 +14,7 @@
 
 验证：Node `--check`；jsdom harness（面板注入、站点/下载器、手填、POST 合并、主题类继承、switch 结构、填充态标签）；浏览器预览测量（字段 56px、浮动标签 12px、switch track 36×14）。
 
-提交：`PENDING`
+提交：`f38d792`
 
 ### Jackett 1.1.2
 
