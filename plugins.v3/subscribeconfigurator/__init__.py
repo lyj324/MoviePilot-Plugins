@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -28,7 +30,7 @@ class SubscribeConfigurator(_PluginBase):
     # ── 元数据 ──
     plugin_name = "订阅增强"
     plugin_desc = "在订阅添加对话框注入 start_episode / filter / quality 等字段，添加订阅时即可一次性配置。"
-    plugin_version = "0.14.0"
+    plugin_version = "0.15.0"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeconfigurator_"
@@ -36,14 +38,17 @@ class SubscribeConfigurator(_PluginBase):
     auth_level = 1
 
     # ── 常量 ──
-    # Marker format: includes plugin version so init_plugin can detect
-    # "already patched with THIS version" vs "patched with an older version"
-    # and force-repatch on upgrade. (v1 just changed marker string is fine.)
-    PATCH_MARKER = "<!-- mp-subscribeconfigurator-patch v3 -->"
+    # Marker prefix. The version/config suffix lives inside the same HTML
+    # comment (`<!-- ... v3 (sc=v0.15.0; cfg=...) -->`) so the cleanup regex
+    # can remove the whole line; 0.14.0 left the suffix outside the comment.
+    PATCH_MARKER = "<!-- mp-subscribeconfigurator-patch v3"
     PATCH_SCRIPT_FILENAME = "_subscribe_patch.js"
     BACKUP_SUFFIX = ".subscribeconfigurator.bak"
     # Regex captures `sc=vX.Y.Z` so we can parse current version from index.html
     _SC_VERSION_RE = re.compile(r"sc=v([\d.]+)")
+    # Config fingerprint embedded in the script URL + marker, so changing the
+    # plugin form (default episode / auto apply) forces a rewrite of patch.js.
+    _CFG_RE = re.compile(r"cfg=([0-9a-f]{8,64})")
 
     # 容器内路径（默认 MP v3 frontend baked 在 /public）
     PUBLIC_DIR = "/public"
@@ -63,19 +68,20 @@ class SubscribeConfigurator(_PluginBase):
         self._auto_apply_defaults = bool(config.get("auto_apply_defaults", False))
 
         if not self._enabled:
-            logger.info("SubscribeConfigurator: 用户在配置里关闭，跳过 patch")
+            logger.info("SubscribeConfigurator: 用户在配置里关闭，还原前端 patch")
+            self._restore()
             return
 
         # 防御性探测
         if not os.path.isfile(self.PUBLIC_INDEX):
-            logger.warn(
+            logger.warning(
                 "SubscribeConfigurator: %s 不存在；可能容器用 host 挂载覆盖了 /public，"
                 "无法在容器侧 patch 前端。请改用浏览器用户脚本方案。",
                 self.PUBLIC_INDEX,
             )
             return
         if not os.access(self.PUBLIC_INDEX, os.W_OK):
-            logger.warn(
+            logger.warning(
                 "SubscribeConfigurator: %s 不可写，跳过 patch（容器安全策略？）",
                 self.PUBLIC_INDEX,
             )
@@ -85,26 +91,45 @@ class SubscribeConfigurator(_PluginBase):
             with open(self.PUBLIC_INDEX, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as err:
-            logger.warn(f"SubscribeConfigurator: 读 index.html 失败：{err}")
+            logger.warning(f"SubscribeConfigurator: 读 index.html 失败：{err}")
             return
 
-        # Detect current patch version in index.html (sc=vX.Y.Z) so we know
-        # whether it's up-to-date OR needs (re)patch on plugin upgrade.
+        # Version + config fingerprint + file/marker presence all have to
+        # match; otherwise a config change or a lost patch.js would be ignored
+        # because index.html still carried the old sc=vX.Y.Z marker.
+        cfg_fp = self._config_fingerprint()
         m = self._SC_VERSION_RE.search(content)
         current_sc_version = m.group(1) if m else None
-        if current_sc_version == self.plugin_version:
+        cfg_m = self._CFG_RE.search(content)
+        current_cfg = cfg_m.group(1) if cfg_m else None
+        patch_exists = os.path.exists(self.PUBLIC_PATCH_JS)
+        marker_present = self.PATCH_MARKER in content
+
+        if (
+            current_sc_version == self.plugin_version
+            and current_cfg == cfg_fp
+            and patch_exists
+            and marker_present
+        ):
             logger.info(
-                "SubscribeConfigurator: index.html 已是当前版本 (sc=v%s)，跳过",
+                "SubscribeConfigurator: index.html 已是当前版本/配置 "
+                "(sc=v%s, cfg=%s)，跳过",
                 self.plugin_version,
+                cfg_fp,
             )
             return
-        if current_sc_version:
+
+        if current_sc_version or current_cfg:
             logger.info(
-                "SubscribeConfigurator: index.html 是旧版本 (sc=v%s)，plugin 当前 v%s → 重新 patch",
+                "SubscribeConfigurator: 旧版本/旧配置 "
+                "(sc=v%s, cfg=%s) -> 当前 (v%s, cfg=%s)，重新 patch",
                 current_sc_version,
+                current_cfg,
                 self.plugin_version,
+                cfg_fp,
             )
-        # else: no marker at all → fresh patch below
+        else:
+            logger.info("SubscribeConfigurator: 首次注入前端 patch")
 
         # Strip any older subscribeconfigurator marker/script (any version) so
         # we don't accumulate stale blocks if a previous plugin version was
@@ -112,14 +137,15 @@ class SubscribeConfigurator(_PluginBase):
         old_strip = re.compile(
             r'<script defer src="/_subscribe_patch\.js(?:\?[^"]*)?"\s*></script>\s*\n?'
             r'|'
-            r'<!--\s*mp-subscribeconfigurator-patch\s+v\d+(?:\s*\(sc=v[\d.]+\))?\s*-->',
+            r'<!--\s*mp-subscribeconfigurator-patch\s+v\d+(?:\s*\([^)]*\))?\s*-->'
+            r'(?:\s*\(sc=v[\d.]+(?:;\s*cfg=[0-9a-f]+)?\))?',
             re.MULTILINE,
         )
         content = old_strip.sub("", content)
 
         try:
             self._write_patch_js()
-            self._backup_and_inject(content)
+            self._backup_and_inject(content, cfg_fp)
             logger.info(
                 "SubscribeConfigurator: patch 注入完成（%s + %s）。"
                 "前端添加订阅对话框将出现「订阅增强」面板。",
@@ -133,22 +159,52 @@ class SubscribeConfigurator(_PluginBase):
         """plugin 卸载 / 容器关闭时尽量还原。
 
         注意：MP v3 容器被 SIGTERM 时 supervisord 不一定回调 stop_service，
-        所以 init_plugin 的幂等检测是真正的"自愈"机制。
+        所以 init_plugin 的版本/配置指纹检测是真正的"自愈"机制。
         """
+        self._restore()
+
+    def _restore(self) -> None:
+        """Restore index.html from backup and remove the injected script."""
         try:
             bak = self.PUBLIC_INDEX + self.BACKUP_SUFFIX
             if os.path.exists(bak):
                 with open(bak, "r", encoding="utf-8") as f:
                     original = f.read()
-                with open(self.PUBLIC_INDEX, "w", encoding="utf-8") as f:
-                    f.write(original)
+                self._atomic_write(self.PUBLIC_INDEX, original)
                 os.remove(bak)
                 logger.info("SubscribeConfigurator: 已还原 %s", self.PUBLIC_INDEX)
             if os.path.exists(self.PUBLIC_PATCH_JS):
                 os.remove(self.PUBLIC_PATCH_JS)
                 logger.info("SubscribeConfigurator: 已删除 %s", self.PUBLIC_PATCH_JS)
         except Exception as err:
-            logger.warn(f"SubscribeConfigurator: 还原失败：{err}")
+            logger.warning(f"SubscribeConfigurator: 还原失败：{err}")
+
+    def _config_fingerprint(self) -> str:
+        payload = {
+            "default_start_episode": self._default_start_episode,
+            "auto_apply_defaults": self._auto_apply_defaults,
+        }
+        raw = json.dumps(
+            payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _atomic_write(path: str, content: str) -> None:
+        """Write via a temp file + os.replace so a crash cannot truncate the file."""
+        tmp = f"{path}.tmp-{os.getpid()}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     # ── MP plugin 接口 ──
     def get_state(self) -> bool:
@@ -243,42 +299,46 @@ class SubscribeConfigurator(_PluginBase):
 
     # ── 内部 ──
     def _write_patch_js(self) -> None:
-        """从 plugin 包内 patch/_subscribe_patch.js 复制到 /public/_subscribe_patch.js"""
-        content: Optional[str] = None
-        try:
-            from importlib.resources import files
+        """Copy patch/_subscribe_patch.js to /public and prepend server config.
 
-            resource = files("plugins.subscribeconfigurator.patch").joinpath(
-                "_subscribe_patch.js"
-            )
-            content = resource.read_text(encoding="utf-8")
-        except Exception:
-            pass
+        The JS reads ``window.__MP_SC_CONFIG__`` so default episode / auto-apply
+        are actually honored. The config fingerprint is part of the script URL,
+        so changing it in the plugin form busts the browser cache too.
+        """
+        here = os.path.dirname(os.path.abspath(__file__))
+        patch_path = os.path.join(here, "patch", "_subscribe_patch.js")
+        with open(patch_path, "r", encoding="utf-8") as f:
+            content = f.read()
 
-        if content is None:
-            here = os.path.dirname(os.path.abspath(__file__))
-            patch_path = os.path.join(here, "patch", "_subscribe_patch.js")
-            with open(patch_path, "r", encoding="utf-8") as f:
-                content = f.read()
+        cfg = {
+            "default_start_episode": self._default_start_episode,
+            "auto_apply_defaults": self._auto_apply_defaults,
+        }
+        prefix = (
+            "window.__MP_SC_CONFIG__ = "
+            + json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+            + ";\n"
+        )
+        self._atomic_write(self.PUBLIC_PATCH_JS, prefix + content)
 
-        with open(self.PUBLIC_PATCH_JS, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    def _backup_and_inject(self, content: str) -> None:
+    def _backup_and_inject(self, content: str, cfg_fp: str) -> None:
         bak = self.PUBLIC_INDEX + self.BACKUP_SUFFIX
-        with open(bak, "w", encoding="utf-8") as f:
-            f.write(content)
+        self._atomic_write(bak, content)
 
-        # cache-bust ts + plugin version in script src so browser always refetches
-        # AND so init_plugin can detect "already-current" via sc= match.
+        # cache-bust ts + plugin version + config fingerprint in script src so
+        # the browser always refetches after a plugin upgrade or config change.
+        # init_plugin reads both back from index.html to decide whether to skip.
         import time as _time
+
         cache_bust = int(_time.time())
         # Strip any inline comment characters from plugin_version to keep
         # the HTML comment safe (plugin_version is "0.9.1" style, but defensive)
         safe_ver = re.sub(r"[^0-9A-Za-z._-]", "", self.plugin_version) or "0"
+        safe_cfg = re.sub(r"[^0-9a-f]", "", cfg_fp)[:32] or "0"
         script_tag = (
-            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}?v={cache_bust}&sc={safe_ver}"></script>\n'
-            f"{self.PATCH_MARKER} (sc=v{safe_ver})"
+            f'<script defer src="/{self.PATCH_SCRIPT_FILENAME}'
+            f'?v={cache_bust}&sc={safe_ver}&cfg={safe_cfg}"></script>\n'
+            f"{self.PATCH_MARKER} (sc=v{safe_ver}; cfg={safe_cfg}) -->"
         )
         if "</head>" in content:
             new_content = content.replace("</head>", f"{script_tag}\n</head>", 1)
@@ -286,5 +346,4 @@ class SubscribeConfigurator(_PluginBase):
             # 极端：没有 </head>，追加到末尾
             new_content = content + f"\n{script_tag}\n"
 
-        with open(self.PUBLIC_INDEX, "w", encoding="utf-8") as f:
-            f.write(new_content)
+        self._atomic_write(self.PUBLIC_INDEX, new_content)

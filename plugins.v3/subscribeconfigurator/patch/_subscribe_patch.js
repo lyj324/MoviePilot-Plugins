@@ -1,12 +1,14 @@
-/* SubscribeConfigurator — frontend patch v14
- * v14 fixes (both found by rendering the panel in a real browser against MP's own theme):
- *   1. Dropdown menu used `rgb(var(--v-theme-surface-bright))`. In MP's glass theme that
- *      variable is 204,191,214 (light lavender) while --v-theme-on-surface is 242,245,250
- *      (near white) -> near-invisible menu. Menu now uses --v-theme-surface (24,34,53).
- *   2. The async option loaders called /api/v1/site and /api/v1/download/clients with
- *      `credentials:'same-origin'` only. MP authenticates with an `Authorization: Bearer`
- *      header whose token lives in localStorage['auth'].token, so those calls always 401'd
- *      and the fields fell back to "加载失败". Now the token is attached.
+/* SubscribeConfigurator — frontend patch v15
+ * v15 fixes:
+ *   1. Honor server config (`window.__MP_SC_CONFIG__`) for default start episode /
+ *      auto-apply; v14 only read localStorage, which nothing ever wrote.
+ *   2. Multi-select read-modify-write from localStorage on every click; v14 reused
+ *      a stale snapshot, so selecting A then B stored only B.
+ *   3. Downloader is single-select (schema expects a string); sites stays multi.
+ *   4. Failed async option load now opens a real manual prompt instead of an empty
+ *      menu with only "clear".
+ *   5. Guardrails: whitelist fields, normalize types, one-shot defaults ON, 401 hint,
+ *      option cache, debounced observer, keep a live panel on re-scan.
  */
 (function () {
   "use strict";
@@ -15,7 +17,23 @@
   const LS_DEFAULT_EPISODE_KEY = "mp_subscribe_default_start_episode";
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
+  const PANEL_VERSION = "v15";
   const API_BASE = "/api/v1";
+  const OPTION_TTL_MS = 5 * 60 * 1000;
+  const OPTION_CACHE = {};
+
+  // Values the panel is allowed to merge into the subscribe POST. Anything
+  // else in localStorage is ignored so a stale/manual key cannot inject
+  // arbitrary fields into the API payload.
+  const ALLOWED_MODELS = new Set([
+    "keyword", "total_episode", "start_episode", "quality", "resolution",
+    "effect", "sites", "downloader", "save_path", "search_interval",
+    "best_version", "best_version_full", "search_imdbid", "filter",
+    "include", "exclude", "season", "episode_group", "media_category",
+    "custom_words",
+  ]);
+  const BOOL_MODELS = new Set(["best_version", "best_version_full", "search_imdbid"]);
+  const NUM_MODELS = new Set(["total_episode", "start_episode", "season", "search_interval"]);
 
   // MP keeps the auth token in localStorage under "auth" -> {token, remember, ...}
   function authHeaders() {
@@ -31,9 +49,35 @@
     return fetch(API_BASE + path, { credentials: "same-origin", headers: authHeaders() });
   }
 
+  // Raw option lists change rarely (sites / downloaders). Cache the parsed
+  // array for a few minutes so opening the dialog repeatedly doesn't hammer
+  // /api/v1/site every time.
+  function apiGetCached(path) {
+    const now = Date.now();
+    const hit = OPTION_CACHE[path];
+    if (hit && now - hit.at < OPTION_TTL_MS) return Promise.resolve(hit.data);
+    return apiGet(path)
+      .then(function (r) {
+        if (!r.ok) {
+          const err = new Error("http " + r.status);
+          err.status = r.status;
+          throw err;
+        }
+        return r.json();
+      })
+      .then(function (json) {
+        const data = json && json.data !== undefined ? json.data : json;
+        const arr = Array.isArray(data) ? data : [];
+        OPTION_CACHE[path] = { at: now, data: arr };
+        return arr;
+      });
+  }
+
   function readOverrides() {
-    try { return JSON.parse(localStorage.getItem(LS_OVERRIDES_KEY) || "{}"); }
-    catch (e) { return {}; }
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LS_OVERRIDES_KEY) || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (e) { return {}; }
   }
   function writeOverrides(obj) {
     try { localStorage.setItem(LS_OVERRIDES_KEY, JSON.stringify(obj)); }
@@ -43,31 +87,75 @@
     try {
       localStorage.removeItem(LS_OVERRIDES_KEY);
       localStorage.removeItem(LS_DEFAULT_EPISODE_KEY);
-      localStorage.removeItem(LS_ONESHOT_KEY);
+      // Keep LS_ONESHOT_KEY: "clear" should not silently re-enable one-shot
+      // for a user who explicitly turned it off.
     } catch (e) {}
   }
   function readDefaultEpisode() {
-    const raw = localStorage.getItem(LS_DEFAULT_EPISODE_KEY);
-    if (!raw) return 0;
-    const n = parseInt(raw, 10);
+    let raw = null;
+    try { raw = localStorage.getItem(LS_DEFAULT_EPISODE_KEY); } catch (e) {}
+    if (raw !== null && raw !== "") {
+      const n = parseInt(raw, 10);
+      return isNaN(n) ? 0 : n;
+    }
+    // Server-side config is only a fallback; an explicit localStorage value
+    // (including "0") always wins.
+    const cfg = (typeof window !== "undefined" && window.__MP_SC_CONFIG__) || {};
+    if (!cfg.auto_apply_defaults) return 0;
+    const n = parseInt(cfg.default_start_episode, 10);
     return isNaN(n) ? 0 : n;
   }
   function isOneShot() {
-    try { return localStorage.getItem(LS_ONESHOT_KEY) === "1"; } catch (e) { return false; }
+    try {
+      const raw = localStorage.getItem(LS_ONESHOT_KEY);
+      // Default ON: prevents overrides from silently leaking into the next
+      // subscription. Users can explicitly store "0" to keep them.
+      return raw === null ? true : raw === "1";
+    } catch (e) { return true; }
+  }
+
+  function normalizeOverride(model, value) {
+    if (model === "sites") {
+      if (Array.isArray(value)) {
+        return value.map(function (x) { return String(x).trim(); }).filter(Boolean);
+      }
+      if (typeof value === "string" && value.trim()) {
+        return value.split(/[,，\s]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+      }
+      return [];
+    }
+    if (model === "downloader") {
+      if (Array.isArray(value)) return value.length ? String(value[0]).trim() : "";
+      return value === null || value === undefined ? "" : String(value).trim();
+    }
+    if (BOOL_MODELS.has(model)) {
+      return value === true || value === 1 || value === "1" || value === "true";
+    }
+    if (NUM_MODELS.has(model)) {
+      const n = parseInt(value, 10);
+      return isNaN(n) ? "" : n;
+    }
+    return value === null || value === undefined ? "" : String(value).trim();
   }
 
   function mergeOverrides(payload) {
+    if (!payload || typeof payload !== "object") return false;
     const overrides = readOverrides();
     let changed = false;
     for (const k in overrides) {
       if (!Object.prototype.hasOwnProperty.call(overrides, k)) continue;
-      const v = overrides[k];
+      if (!ALLOWED_MODELS.has(k)) continue;
+      const v = normalizeOverride(k, overrides[k]);
       if (v === "" || v === null || v === undefined) continue;
+      if (Array.isArray(v) && v.length === 0) continue;
       payload[k] = v;
       changed = true;
     }
+    // Only fill the default when the user did not make an explicit choice.
+    // An explicit 0 ("不指定") must override the server default.
     const defaultEp = readDefaultEpisode();
-    if (defaultEp > 0 && (!payload.start_episode || payload.start_episode === 0)) {
+    const explicitStart = Object.prototype.hasOwnProperty.call(overrides, "start_episode");
+    if (defaultEp > 0 && !explicitStart && !payload.start_episode) {
       payload.start_episode = defaultEp;
       changed = true;
     }
@@ -77,7 +165,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v14] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v15] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -91,18 +179,20 @@
       return OrigOpen.apply(this, arguments);
     };
     XMLHttpRequest.prototype.send = function (body) {
+      let merged = false;
       try {
         if ((this.__mpMethod || "") === "POST" && (this.__mpUrl || "").indexOf("/subscribe") !== -1 &&
             typeof body === "string" && body.charAt(0) === "{") {
           const payload = JSON.parse(body);
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
-            console.info("[subscribeconfigurator v14] overrides merged into subscribe POST");
+            merged = true;
+            console.info("[subscribeconfigurator v15] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
       const xhr = this;
-      if (xhr.__mpMethod === "POST" && (xhr.__mpUrl || "").indexOf("/subscribe") !== -1) {
+      if (merged) {
         xhr.addEventListener("load", function () {
           try { if (xhr.status >= 200 && xhr.status < 300) maybeOneShot(); } catch (e) {}
         });
@@ -113,16 +203,26 @@
 
   const OrigFetch = window.fetch;
   window.fetch = function (resource, init) {
+    let merged = false;
     try {
       const url = typeof resource === "string" ? resource : (resource && resource.url) || "";
       if (((init && init.method) || "GET").toUpperCase() === "POST" &&
           url.indexOf("/subscribe") !== -1 && init && typeof init.body === "string" &&
           init.body.charAt(0) === "{") {
         const payload = JSON.parse(init.body);
-        if (mergeOverrides(payload)) init.body = JSON.stringify(payload);
+        if (mergeOverrides(payload)) {
+          init.body = JSON.stringify(payload);
+          merged = true;
+        }
       }
     } catch (e) {}
-    return OrigFetch.apply(this, arguments);
+    const promise = OrigFetch.apply(window, arguments);
+    if (merged && promise && typeof promise.then === "function") {
+      promise.then(function (res) {
+        if (res && res.ok) maybeOneShot();
+      }).catch(function () {});
+    }
+    return promise;
   };
 
   // ── helpers ──
@@ -198,6 +298,7 @@
     // toggle
     if (openMenu && openMenu.anchor === anchor) { closeOpenMenu(); return; }
     closeOpenMenu();
+    const refresh = opts && opts.refresh;
     const rect = anchor.getBoundingClientRect();
     const menu = el("div", { class: "mp-sc-menu" });
     const list = el("div", { class: "mp-sc-menu__list" });
@@ -209,14 +310,19 @@
         row.insertBefore(box, row.firstChild);
         row.addEventListener("click", function (ev) {
           ev.stopPropagation();
-          it.onSelect();
-          const nowSel = !it.selected;
+          // onSelect re-reads localStorage and returns the new checked state.
+          const nowSel = !!it.onSelect();
           it.selected = nowSel;
           box.classList.toggle("mp-sc-cb--on", nowSel);
           row.classList.toggle("mp-sc-menu__item--sel", nowSel);
+          if (refresh) refresh();
         });
       } else {
-        row.addEventListener("click", function () { it.onSelect(); closeOpenMenu(); refresh(); });
+        row.addEventListener("click", function () {
+          it.onSelect();
+          closeOpenMenu();
+          if (refresh) refresh();
+        });
       }
       list.appendChild(row);
     });
@@ -234,15 +340,13 @@
       }
     });
     anchor.classList.add("mp-sc-dd--open");
-    openMenu = { el: menu, anchor: anchor, refresh: opts && opts.refresh };
-    var refresh = opts && opts.refresh;
+    openMenu = { el: menu, anchor: anchor, refresh: refresh };
   }
 
   function buildDropdown(field, overrides) {
     const wrap = el("div", { class: "mp-sc-field mp-sc-dd" });
     const cur = overrides[field.model];
     const current = cur === undefined || cur === null ? "" : String(cur);
-    const isNative = current === "" || field.options.indexOf(current) !== -1;
 
     const anchor = el("div", { class: "mp-sc-dd__field", tabindex: "0", role: "button" });
     if (field.icon) anchor.appendChild(el("span", { class: "mp-sc-ico", html: svgIcon(field.icon) }));
@@ -265,11 +369,12 @@
       const ov = readOverrides();
       const v = ov[field.model];
       const s = v === undefined || v === null ? "" : String(v);
+      const isNative = s === "" || field.options.indexOf(s) !== -1;
       const items = field.options.map(function (o) {
         return { label: field.optionLabel ? field.optionLabel(o) : o, selected: s === o,
                  onSelect: function () { commitValue(field.model, s === o ? "" : o); } };
       });
-      items.unshift({ label: "全部", selected: s === "",
+      items.unshift({ label: field.placeholder || "全部", selected: s === "",
                       onSelect: function () { commitValue(field.model, ""); } });
       items.push({ label: "自定义…", selected: !isNative && s !== "",
                    onSelect: function () {
@@ -290,8 +395,7 @@
   // Async dropdown that loads its options from an MP API endpoint.
   function buildAsyncDropdown(field, overrides) {
     const wrap = el("div", { class: "mp-sc-field mp-sc-dd" });
-    const cur = overrides[field.model];
-    const current = Array.isArray(cur) ? cur.slice() : (cur ? [String(cur)] : []);
+    const isMulti = !!field.multi;
 
     const anchor = el("div", { class: "mp-sc-dd__field mp-sc-dd__field--loading", tabindex: "0", role: "button" });
     if (field.icon) anchor.appendChild(el("span", { class: "mp-sc-ico", html: svgIcon(field.icon) }));
@@ -308,48 +412,86 @@
       const ov = readOverrides();
       const v = ov[field.model];
       const sel = Array.isArray(v) ? v : (v ? [String(v)] : []);
-      valEl.textContent = sel.length ? (sel.length > 2 ? sel.slice(0, 2).join("、") + " 等 " + sel.length + " 项" : sel.join("、"))
-                                      : (field.placeholder || "全部");
+      valEl.textContent = sel.length
+        ? (sel.length > 2 ? sel.slice(0, 2).join("、") + " 等 " + sel.length + " 项" : sel.join("、"))
+        : (field.placeholder || "全部");
       valEl.classList.toggle("mp-sc-dd__value--ph", !sel.length);
+    }
+
+    function promptManual() {
+      const ov = readOverrides();
+      const raw = ov[field.model];
+      const initial = Array.isArray(raw) ? raw.join(",")
+        : (raw === undefined || raw === null ? "" : String(raw));
+      const val = window.prompt(
+        "手动输入「" + field.label + "」" + (isMulti ? "（多个用逗号分隔）" : ""),
+        initial
+      );
+      if (val === null) return;
+      const trimmed = val.trim();
+      if (isMulti) {
+        commitValue(field.model, trimmed ? trimmed.split(/[,，\s]+/).filter(Boolean) : "");
+      } else {
+        commitValue(field.model, trimmed);
+      }
+      refresh();
     }
 
     function doOpen(ev) {
       if (ev) ev.stopPropagation();
-      if (!loaded && !failed) return;
+      if (failed) { promptManual(); return; }
+      if (!loaded) return;
       const ov = readOverrides();
       const v = ov[field.model];
       const sel = Array.isArray(v) ? v.slice() : (v ? [String(v)] : []);
       const menuItems = items.map(function (it) {
-        return { label: it.label, selected: sel.indexOf(it.value) !== -1,
-                 onSelect: function () {
-                   const next = sel.slice();
-                   const i = next.indexOf(it.value);
-                   if (i === -1) next.push(it.value); else next.splice(i, 1);
-                   commitValue(field.model, next);
-                 } };
+        return {
+          label: it.label,
+          selected: sel.indexOf(it.value) !== -1,
+          onSelect: function () {
+            // Re-read on every click. v14 captured `sel` once, so choosing A
+            // then B wrote only B.
+            const now = readOverrides();
+            const raw = now[field.model];
+            if (isMulti) {
+              const next = Array.isArray(raw) ? raw.slice() : (raw ? [String(raw)] : []);
+              const i = next.indexOf(it.value);
+              if (i === -1) next.push(it.value); else next.splice(i, 1);
+              commitValue(field.model, next.length ? next : "");
+              return i === -1;
+            }
+            const currentVal = raw === undefined || raw === null ? "" : String(raw);
+            const same = currentVal === it.value;
+            commitValue(field.model, same ? "" : it.value);
+            return !same;
+          },
+        };
       });
-      menuItems.unshift({ label: "全部（清空）", selected: sel.length === 0,
-                          onSelect: function () { commitValue(field.model, ""); } });
-      openDropdown(anchor, menuItems, { multi: true, refresh: refresh });
+      menuItems.unshift({
+        label: isMulti ? "全部（清空）" : "跟随系统",
+        selected: sel.length === 0,
+        onSelect: function () { commitValue(field.model, ""); return false; },
+      });
+      openDropdown(anchor, menuItems, { multi: isMulti, refresh: refresh });
     }
     anchor.addEventListener("click", doOpen);
     wrap.appendChild(anchor);
     if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
 
-    apiGet(field.api)
-      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
-      .then(function (json) {
-        const data = json && json.data !== undefined ? json.data : json;
-        items = (Array.isArray(data) ? data : []).map(field.mapItem);
+    apiGetCached(field.api)
+      .then(function (data) {
+        items = data.map(field.mapItem);
         loaded = true;
         anchor.classList.remove("mp-sc-dd__field--loading");
         refresh();
       })
-      .catch(function () {
+      .catch(function (err) {
         failed = true;
         loaded = true;
         anchor.classList.remove("mp-sc-dd__field--loading");
-        valEl.textContent = "加载失败，点此手填";
+        valEl.textContent = (err && err.status === 401)
+          ? "登录已过期，点此手填"
+          : "加载失败，点此手填";
         valEl.classList.add("mp-sc-dd__value--ph");
       });
     refresh();
@@ -449,11 +591,12 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
 
-    const panel = el("div", { [PANEL_MARKER]: "v14", class: "mp-sc-panel" });
+    const panel = el("div", { [PANEL_MARKER]: PANEL_VERSION, class: "mp-sc-panel" });
 
     const header = el("div", { class: "mp-sc-header" });
     const hrow = el("div", { class: "mp-sc-hrow" });
-    const activeCount = Object.keys(overrides).length + (defaultEp > 0 ? 1 : 0);
+    const hasStartOverride = Object.prototype.hasOwnProperty.call(overrides, "start_episode");
+    const activeCount = Object.keys(overrides).length + (defaultEp > 0 && !hasStartOverride ? 1 : 0);
     hrow.appendChild(el("div", { class: "mp-sc-title", text: "订阅增强（SubscribeConfigurator）" }));
     hrow.appendChild(el("span", { class: "mp-sc-badge" + (activeCount ? " mp-sc-badge--on" : ""),
       text: activeCount ? ("已填 " + activeCount + " 项") : "未填写" }));
@@ -463,7 +606,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v14] overrides cleared by user");
+      console.info("[subscribeconfigurator v15] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     header.appendChild(hrow);
@@ -474,12 +617,13 @@
     osInput.addEventListener("change", function (ev) {
       ev.stopPropagation();
       try {
-        if (osInput.checked) localStorage.setItem(LS_ONESHOT_KEY, "1");
-        else localStorage.removeItem(LS_ONESHOT_KEY);
+        // Store both states explicitly: absence means "default ON", but an
+        // unchecked box must survive a "清空全部" click.
+        localStorage.setItem(LS_ONESHOT_KEY, osInput.checked ? "1" : "0");
       } catch (e) {}
     });
     osLabel.appendChild(osInput);
-    osLabel.appendChild(el("span", { text: "一次性（提交一次后自动清空）" }));
+    osLabel.appendChild(el("span", { text: "一次性（默认开启，提交一次后自动清空）" }));
     header.appendChild(osLabel);
     panel.appendChild(header);
 
@@ -576,15 +720,34 @@
     ".mp-sc-sw__hint{font-size:12px;line-height:1.35;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));flex:1 1 100%;padding-left:28px}",
   ].join("");
 
+  const DIALOG_SELECTOR = '.v-dialog, .v-overlay__content, [role="dialog"]';
+
   function tryInject(root) {
-    if (!root || typeof root.querySelectorAll !== "function") return;
-    const candidates = root.querySelectorAll(".v-dialog, .v-overlay__content, [role=\"dialog\"]");
+    if (!root) return;
+    const candidates = [];
+    if (root.nodeType === 1 && root.matches && root.matches(DIALOG_SELECTOR)) {
+      candidates.push(root);
+    }
+    if (typeof root.querySelectorAll === "function") {
+      root.querySelectorAll(DIALOG_SELECTOR).forEach(function (d) { candidates.push(d); });
+    }
     let injected = 0;
     candidates.forEach(function (dialog) {
       if (!dialog) return;
-      const old = dialog.querySelector('[data-mp-subscribe-configurator]');
-      if (old) old.remove();
-      if (dialog.__mp_sc_patched) return;
+      const old = dialog.querySelector("[" + PANEL_MARKER + "]");
+      if (old) {
+        // A live panel from this build is fine; do NOT remove it before
+        // checking the patched flag (v14 did, so a repeat scan deleted the UI).
+        if (old.getAttribute(PANEL_MARKER) === PANEL_VERSION) {
+          dialog.__mp_sc_patched = true;
+          return;
+        }
+        old.remove();
+        dialog.__mp_sc_patched = false;
+      } else if (dialog.__mp_sc_patched) {
+        // SPA re-render dropped the panel but kept the element flag.
+        dialog.__mp_sc_patched = false;
+      }
       if (dialog.classList && dialog.classList.contains("v-card-link")) return;
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
@@ -603,7 +766,22 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v14] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v15] injected into " + injected + " dialog(s)");
+  }
+
+  let injectTimer = null;
+  let pendingRoots = [];
+  function scheduleInject(root) {
+    if (!root) root = document.body;
+    if (pendingRoots.indexOf(root) === -1) pendingRoots.push(root);
+    if (injectTimer) return;
+    // MP's dialog renders many nested nodes; coalesce them into one scan.
+    injectTimer = setTimeout(function () {
+      injectTimer = null;
+      const roots = pendingRoots;
+      pendingRoots = [];
+      roots.forEach(tryInject);
+    }, 100);
   }
 
   function attach() {
@@ -612,21 +790,21 @@
       muts.forEach(function (m) {
         for (let i = 0; i < m.addedNodes.length; i++) {
           const n = m.addedNodes[i];
-          if (n && n.nodeType === 1) tryInject(n);
+          if (n && n.nodeType === 1) scheduleInject(n);
         }
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v14] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v15] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v14] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v15] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v14] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v15] FATAL", e); }
 })();
