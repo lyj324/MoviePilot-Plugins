@@ -30,7 +30,7 @@
 
 验证：Node `--check`；jsdom harness（`/site/rss` 主端点、`/site/` 降级、非激活站点过滤、多选存 ID、显示名称、名称/ID 手填、未识别名称拒绝、缓存列表手填、POST 合并为整数数组、401 重试菜单）；Python harness 全部通过。
 
-提交：`f279c62`
+提交：`7c9da4c`
 
 ### 订阅增强 0.15.0
 
