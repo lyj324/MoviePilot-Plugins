@@ -1,11 +1,12 @@
-/* SubscribeConfigurator — frontend patch v13
- * v13 replaces native <select> with a custom dropdown (native select renders its popup
- * with the OS, so CSS cannot theme it and it reads as a light box on MP's dark dialog).
- * The menu is teleported to document.body with fixed positioning so the dialog's
- * overflow can never clip it — same technique Vuetify uses.
- * Also in v13: switches moved to a dedicated full-width row (no more wrapped labels),
- * missing native fields added (search_interval / save_path), and mdi icons copied from
- * MP's own EditDialog markup for visual parity.
+/* SubscribeConfigurator — frontend patch v14
+ * v14 fixes (both found by rendering the panel in a real browser against MP's own theme):
+ *   1. Dropdown menu used `rgb(var(--v-theme-surface-bright))`. In MP's glass theme that
+ *      variable is 204,191,214 (light lavender) while --v-theme-on-surface is 242,245,250
+ *      (near white) -> near-invisible menu. Menu now uses --v-theme-surface (24,34,53).
+ *   2. The async option loaders called /api/v1/site and /api/v1/download/clients with
+ *      `credentials:'same-origin'` only. MP authenticates with an `Authorization: Bearer`
+ *      header whose token lives in localStorage['auth'].token, so those calls always 401'd
+ *      and the fields fell back to "加载失败". Now the token is attached.
  */
 (function () {
   "use strict";
@@ -15,6 +16,20 @@
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
   const API_BASE = "/api/v1";
+
+  // MP keeps the auth token in localStorage under "auth" -> {token, remember, ...}
+  function authHeaders() {
+    try {
+      const raw = localStorage.getItem("auth");
+      if (!raw) return {};
+      const token = (JSON.parse(raw) || {}).token;
+      return token ? { Authorization: "Bearer " + token } : {};
+    } catch (e) { return {}; }
+  }
+
+  function apiGet(path) {
+    return fetch(API_BASE + path, { credentials: "same-origin", headers: authHeaders() });
+  }
 
   function readOverrides() {
     try { return JSON.parse(localStorage.getItem(LS_OVERRIDES_KEY) || "{}"); }
@@ -62,7 +77,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v13] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v14] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -82,7 +97,7 @@
           const payload = JSON.parse(body);
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
-            console.info("[subscribeconfigurator v13] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v14] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -321,7 +336,7 @@
     wrap.appendChild(anchor);
     if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
 
-    fetch(API_BASE + field.api, { credentials: "same-origin" })
+    apiGet(field.api)
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
       .then(function (json) {
         const data = json && json.data !== undefined ? json.data : json;
@@ -434,7 +449,7 @@
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
 
-    const panel = el("div", { [PANEL_MARKER]: "v13", class: "mp-sc-panel" });
+    const panel = el("div", { [PANEL_MARKER]: "v14", class: "mp-sc-panel" });
 
     const header = el("div", { class: "mp-sc-header" });
     const hrow = el("div", { class: "mp-sc-hrow" });
@@ -448,7 +463,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v13] overrides cleared by user");
+      console.info("[subscribeconfigurator v14] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     header.appendChild(hrow);
@@ -543,7 +558,10 @@
     ".mp-sc-dd--open .mp-sc-label,.mp-sc-dd__field:focus .mp-sc-label,.mp-sc-tf__field:focus-within .mp-sc-label{color:rgb(var(--v-theme-primary))}",
     ".mp-sc-hint{font-size:12px;line-height:1.4;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));padding:4px 2px 10px}",
     // teleported menu
-    ".mp-sc-menu{z-index:3000;background:rgb(var(--v-theme-surface-bright,var(--v-theme-surface)));color:" + ON_SURFACE + ";border-radius:4px;border:1px solid rgba(var(--v-theme-on-surface),.12);box-shadow:0 6px 20px rgba(0,0,0,.45);overflow:hidden}",
+    // NOTE: background must be --v-theme-surface. In MP's glass theme
+    // --v-theme-surface-bright is 204,191,214 (light lavender) while
+    // --v-theme-on-surface is 242,245,250 (near white) -> unreadable menu.
+    ".mp-sc-menu{z-index:3000;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border-radius:4px;border:1px solid rgba(var(--v-theme-on-surface),.12);box-shadow:0 6px 20px rgba(0,0,0,.55);overflow:hidden}",
     ".mp-sc-menu__list{max-height:260px;overflow-y:auto;padding:4px 0}",
     ".mp-sc-menu__item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:14px;line-height:1.4;cursor:pointer;white-space:nowrap}",
     ".mp-sc-menu__item:hover{background:rgba(var(--v-theme-on-surface),.08)}",
@@ -585,7 +603,7 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v13] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v14] injected into " + injected + " dialog(s)");
   }
 
   function attach() {
@@ -599,16 +617,16 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v13] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v14] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v13] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v14] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v13] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v14] FATAL", e); }
 })();
