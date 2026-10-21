@@ -29,7 +29,7 @@ class Jackett(_PluginBase):
     plugin_name = "Jackett"
     plugin_desc = "通过 Jackett (Torznab) 接入第三方索引器（1337x/RARBG/nyaa 等）。"
     plugin_icon = "https://raw.githubusercontent.com/Jackett/Jackett/master/src/Jackett.Common/Content/favicon.ico"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324"
     plugin_config_prefix = "jackett_"
@@ -304,7 +304,10 @@ class Jackett(_PluginBase):
         try:
             xml_text = await self._http_get_text(url)
         except Exception as err:
-            logger.warn(f"Jackett [{indexer_id}] 请求失败：{err}")
+            # Include url_path (no apikey) so the user can tell which indexer
+            # is slow vs which actually returned data. Type name disambiguates
+            # "no response (timeout)" from real Jackett errors.
+            logger.warn(f"Jackett [{indexer_id}] {url_path} 请求失败 [{type(err).__name__}]: {err}")
             return []
         return _parse_torznab(xml_text, indexer_id)
 
@@ -312,16 +315,22 @@ class Jackett(_PluginBase):
         """Use get_res to get the full Response object so we can see status,
         headers, and cookies (get() returns just the body string)."""
         from app.adapters.network.http import AsyncRequestUtils
+        # 60s: Jackett's per-indexer torznab call internally fetches the public
+        # site (e.g. 1337x.to). Slow public sites can legitimately exceed the
+        # previous 20s ceiling. When the call really fails (e.g. Jackett
+        # itself offline) httpx still raises, so this won't mask outages.
         utils = AsyncRequestUtils(
             cookies=self._session_cookies or None,
-            timeout=20,
+            timeout=60,
         )
         response = await utils.get_res(
             url,
             allow_redirects=False,  # 关键：不要跟随 302 到登录页
         )
         if response is None:
-            raise RuntimeError("no response")
+            # httpx returns None on read/connect/timeout failure. Distinguish so
+            # the user can tell timeouts apart from "Jackett itself down" in logs.
+            raise RuntimeError("no response (likely timeout/connect error)")
         status = response.status_code
         self._last_status = status
         text = response.text or ""
