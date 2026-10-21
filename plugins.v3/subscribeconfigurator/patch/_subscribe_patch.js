@@ -849,6 +849,7 @@
     ".mp-sc-input{flex:1 1 auto;min-width:0;width:100%;border:none;background:transparent;font:inherit;font-size:16px;color:" + ON_SURFACE + ";outline:none;padding:0;margin:0;box-shadow:none}",
     ".mp-sc-dd__value{flex:1 1 auto;min-width:0;font-size:16px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
     ".mp-sc-dd__value--ph{color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
+    ".mp-sc-dd__value--error{font-size:14px;white-space:normal;line-height:1.25}",
     ".mp-sc-dd__arrow{flex:0 0 auto;width:8px;height:8px;margin-left:8px;border-right:2px solid rgba(var(--v-theme-on-surface),.6);border-bottom:2px solid rgba(var(--v-theme-on-surface),.6);transform:rotate(45deg) translateY(-2px);transition:transform .15s}",
     ".mp-sc-dd--open .mp-sc-dd__arrow{transform:rotate(225deg) translateY(-2px)}",
     // floating label: inside when empty, on the outline when filled/focused
