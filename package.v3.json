@@ -3,13 +3,14 @@
     "name": "Jackett",
     "description": "通过 Jackett (Torznab) 接入第三方索引器（1337x / RARBG / nyaa 等）。基于 MP 官方 jackett 插件修补，补上 v3 dispatcher 必需的 get_module() 注册方法。",
     "labels": "站点,索引",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "icon": "https://raw.githubusercontent.com/Jackett/Jackett/master/src/Jackett.Common/Content/favicon.ico",
     "author": "lyj324",
     "level": 2,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v1.1.2": "修复 302 重登录分支的 url_path NameError（cookie 过期后此前无法自愈）；page 参数真正映射到 Torznab offset；site id 改为 crc32 稳定值并避开真实站点 ID；跨索引器按 release 去重（保留 seeders 高者）；索引器列表加 5 分钟缓存；搜索并发限制 6、整体 90s 截止并保留已完成结果；异常日志脱敏 apikey；同步钩子在已有事件循环中不再崩溃；插件页显示最近搜索与最近错误。",
       "v1.1.1": "实测复现「no response」根因：容器到 Jackett per-indexer torznab 调用在 20s 超时时（Jackett 反代 1337x.to 等公网站点较慢），httpx 返回 None，plugin 误报「no response」。修复：超时 20s→60s（Jackett 真正故障时 httpx 仍会抛异常，不会掩盖宕机）；错误信息改带异常类型和 url_path，方便用户定位是哪个 indexer 卡了。",
       "v1.1.0": "修复高风险安全问题：apikey 不再写入日志（urlsplit 仅取 path）；XML 解析切到 defusedxml 防 XXE / billion-laughs；重组仓库结构为 MP 官方 plugins.v3/<plugin_id>/+ package.v3.json 格式。",
       "v1.0.0": "在 MP 官方 jackett 插件基础上实现 get_module()，让 v3 PluginModuleCatalog dispatcher 正确发现 search_torrents / async_search_torrents 钩子；修复现代 Jackett (>=0.22) 要求 session cookie 的 302→/UI/Login 问题。"
