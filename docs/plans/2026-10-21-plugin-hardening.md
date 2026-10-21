@@ -117,5 +117,5 @@ python -c "import json; d=json.load(open('package.v3.json')); print({k: v['versi
 
 验证：`node --check`；jsdom 全部 8 组通过（新增主题类继承、switch 结构、填充态标签、style 自愈）；浏览器预览实测字段 56px、浮动标签 12px、switch track 36×14；Python harness 6 项全部通过。
 
-提交：`f38d792`
+提交：`f38d792`、`58e545a`
 
