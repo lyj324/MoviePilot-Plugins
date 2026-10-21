@@ -2,6 +2,20 @@
 
 ## 2026-10-21
 
+### 订阅增强 0.15.2
+
+修复「CSS 风格和 MP 原生不一致」：
+
+- 不是外部 CSS 加载失败：样式始终由 patch 内联注入 `<style id="mp-sc-styles">`。之前的差异来自自绘控件本身——40px 字段 vs 原生默认 56px、14px 输入文字 vs 16px、标签始终浮在边框上、布尔项用方框 checkbox 而不是 Vuetify switch。
+- 字段改为原生默认 56px outlined 样式，输入文字 16px；标签改为空值时在框内、聚焦/有值时浮到边框（12px）；带前置图标的字段标签对齐到图标右侧。tab 改为 48px 高、16px 内边距，清空按钮改为原生 text button，面板边框减弱。
+- 布尔项（洗版 / 全集洗版 / ImdbID 搜索）改为 Vuetify 风格 switch。
+- teleport 到 `body` 的下拉菜单会复制当前 `v-theme--*` 主题类，避免 CSS 变量丢失导致菜单背景/文字与对话框不一致。
+- 样式注入改为每次检查 DOM；SPA 重新渲染删除 style 后会自动补回，不再依赖一次性布尔标记。
+
+验证：Node `--check`；jsdom harness（面板注入、站点/下载器、手填、POST 合并、主题类继承、switch 结构、填充态标签）；浏览器预览测量（字段 56px、浮动标签 12px、switch track 36×14）。
+
+提交：`PENDING`
+
 ### Jackett 1.1.2
 
 修复：

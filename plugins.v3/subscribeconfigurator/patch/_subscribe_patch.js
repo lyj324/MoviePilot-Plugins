@@ -1,4 +1,11 @@
-/* SubscribeConfigurator — frontend patch v16
+/* SubscribeConfigurator — frontend patch v17
+ * v17 fixes:
+ *   1. Match the native Vuetify form style: 56px outlined fields, 16px input
+ *      text, floating 12px labels, icon-aware label position, native-like
+ *      tabs/text buttons, and Vuetify-style switches instead of raw checkboxes.
+ *   2. Re-inject the inline stylesheet if an SPA re-render removes it.
+ *   3. Copy the active `v-theme--*` class onto the teleported dropdown menu so
+ *      its CSS variables resolve outside the dialog.
  * v16 fixes:
  *   1. Site options load from `GET /site/rss` (the endpoint the native
  *      subscribe dialog uses), falling back to `/site/` and `/site` for older
@@ -19,7 +26,7 @@
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const LS_SITE_ITEMS_KEY = "mp_sc_site_items";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
-  const PANEL_VERSION = "v16";
+  const PANEL_VERSION = "v17";
   const API_BASE = "/api/v1";
   const OPTION_TTL_MS = 5 * 60 * 1000;
   const OPTION_CACHE = {};
@@ -190,7 +197,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v16] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v17] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -212,7 +219,7 @@
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
             merged = true;
-            console.info("[subscribeconfigurator v16] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v17] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -319,6 +326,27 @@
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeOpenMenu(); });
   window.addEventListener("resize", closeOpenMenu);
 
+  // The menu is teleported to <body>, outside the Vuetify theme wrapper. Copy
+  // the active `v-theme--*` class so `--v-theme-*` variables still resolve;
+  // otherwise the menu falls back to transparent/black and looks detached
+  // from the dialog.
+  function inheritThemeClass(target, anchor) {
+    try {
+      const source = anchor.closest(".v-theme--glass, .v-theme--light, .v-theme--dark, .v-theme--purple, .v-theme--transparent, .v-application") ||
+        document.querySelector(".v-application") || document.documentElement;
+      [source, document.documentElement, document.body].forEach(function (host) {
+        if (!host || !host.className) return;
+        String(host.className).split(/\s+/).forEach(function (name) {
+          if (name.indexOf("v-theme--") === 0) target.classList.add(name);
+        });
+      });
+      const dataTheme = (source.getAttribute && source.getAttribute("data-theme")) ||
+        document.documentElement.getAttribute("data-theme") ||
+        (document.body && document.body.getAttribute("data-theme"));
+      if (dataTheme) target.setAttribute("data-theme", dataTheme);
+    } catch (e) {}
+  }
+
   function openDropdown(anchor, items, opts) {
     // toggle
     if (openMenu && openMenu.anchor === anchor) { closeOpenMenu(); return; }
@@ -326,6 +354,7 @@
     const refresh = opts && opts.refresh;
     const rect = anchor.getBoundingClientRect();
     const menu = el("div", { class: "mp-sc-menu" });
+    inheritThemeClass(menu, anchor);
     const list = el("div", { class: "mp-sc-menu__list" });
     items.forEach(function (it) {
       const row = el("div", { class: "mp-sc-menu__item" + (it.selected ? " mp-sc-menu__item--sel" : "") },
@@ -373,7 +402,7 @@
     const cur = overrides[field.model];
     const current = cur === undefined || cur === null ? "" : String(cur);
 
-    const anchor = el("div", { class: "mp-sc-dd__field", tabindex: "0", role: "button" });
+    const anchor = el("div", { class: "mp-sc-dd__field" + (field.icon ? " mp-sc-has-icon" : ""), tabindex: "0", role: "button" });
     if (field.icon) anchor.appendChild(el("span", { class: "mp-sc-ico", html: svgIcon(field.icon) }));
     const valEl = el("div", { class: "mp-sc-dd__value" + (current ? "" : " mp-sc-dd__value--ph"),
       text: current || (field.placeholder || "全部") });
@@ -387,6 +416,7 @@
       const s = v === undefined || v === null ? "" : String(v);
       valEl.textContent = s || (field.placeholder || "全部");
       valEl.classList.toggle("mp-sc-dd__value--ph", !s);
+      anchor.classList.toggle("mp-sc-dd--filled", !!s);
     };
 
     const doOpen = function (ev) {
@@ -414,6 +444,7 @@
     });
     wrap.appendChild(anchor);
     if (field.hint) wrap.appendChild(el("div", { class: "mp-sc-hint", text: field.hint }));
+    refresh();
     return wrap;
   }
 
@@ -422,7 +453,7 @@
     const wrap = el("div", { class: "mp-sc-field mp-sc-dd" });
     const isMulti = !!field.multi;
 
-    const anchor = el("div", { class: "mp-sc-dd__field mp-sc-dd__field--loading", tabindex: "0", role: "button" });
+    const anchor = el("div", { class: "mp-sc-dd__field mp-sc-dd__field--loading" + (field.icon ? " mp-sc-has-icon" : ""), tabindex: "0", role: "button" });
     if (field.icon) anchor.appendChild(el("span", { class: "mp-sc-ico", html: svgIcon(field.icon) }));
     const valEl = el("div", { class: "mp-sc-dd__value mp-sc-dd__value--ph", text: "加载中…" });
     anchor.appendChild(valEl);
@@ -452,7 +483,9 @@
       valEl.textContent = labels.length
         ? (labels.length > 2 ? labels.slice(0, 2).join("、") + " 等 " + labels.length + " 项" : labels.join("、"))
         : (field.placeholder || "全部");
+      valEl.classList.remove("mp-sc-dd__value--error");
       valEl.classList.toggle("mp-sc-dd__value--ph", !sel.length);
+      anchor.classList.toggle("mp-sc-dd--filled", sel.length > 0);
     }
 
     function siteValueFromToken(token) {
@@ -515,6 +548,7 @@
       loaded = false;
       anchor.classList.add("mp-sc-dd__field--loading");
       valEl.classList.remove("mp-sc-dd__value--ph");
+      valEl.classList.remove("mp-sc-dd__value--error");
       valEl.textContent = "加载中…";
       apiGetCached(field.api, field.apiFallbacks)
         .then(function (data) {
@@ -536,7 +570,8 @@
             ? "登录已过期，点此重试/手填"
             : "加载失败，点此重试/手填";
           valEl.classList.add("mp-sc-dd__value--ph");
-          console.warn("[subscribeconfigurator v16] load " + field.api + " failed", err && err.status);
+          valEl.classList.add("mp-sc-dd__value--error");
+          console.warn("[subscribeconfigurator v17] load " + field.api + " failed", err && err.status);
         });
     }
 
@@ -609,7 +644,7 @@
     const hasValue = cur !== undefined && cur !== null && cur !== "";
     const displayVal = hasValue ? String(cur)
       : (field.model === "start_episode" && defaultEp > 0 ? String(defaultEp) : "");
-    const box = el("div", { class: "mp-sc-tf__field" });
+    const box = el("div", { class: "mp-sc-tf__field" + (field.icon ? " mp-sc-has-icon" : "") });
     if (field.icon) box.appendChild(el("span", { class: "mp-sc-ico", html: svgIcon(field.icon) }));
     const input = el("input", { type: field.type || "text", placeholder: " ",
       "data-mp-model": field.model, class: "mp-sc-input", autocomplete: "off", spellcheck: "false" });
@@ -632,10 +667,13 @@
     fields.forEach(function (f) {
       const cur = overrides[f.model];
       const lab = el("label", { class: "mp-sc-sw" });
-      const input = el("input", { type: "checkbox", class: "mp-sc-checkbox", "data-mp-model": f.model });
+      const input = el("input", { type: "checkbox", class: "mp-sc-switch-input", "data-mp-model": f.model });
       input.checked = cur === true || cur === 1 || cur === "1";
       input.addEventListener("change", function () { commitValue(f.model, input.checked ? true : ""); });
       lab.appendChild(input);
+      lab.appendChild(el("span", { class: "mp-sc-sw__track" }, [
+        el("span", { class: "mp-sc-sw__thumb" }),
+      ]));
       lab.appendChild(el("span", { class: "mp-sc-sw__text", text: f.label }));
       if (f.hint) lab.appendChild(el("span", { class: "mp-sc-sw__hint", text: f.hint }));
       row.appendChild(lab);
@@ -716,7 +754,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v16] overrides cleared by user");
+      console.info("[subscribeconfigurator v17] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     header.appendChild(hrow);
@@ -769,71 +807,89 @@
     return panel;
   }
 
-  let stylesInjected = false;
   function injectStyles() {
-    if (stylesInjected || document.getElementById("mp-sc-styles")) { stylesInjected = true; return; }
+    // Check the DOM every time instead of a one-shot boolean: a full SPA
+    // re-render or a head cleanup can remove the style tag, which used to
+    // leave the panel permanently unstyled until a hard reload.
+    if (document.getElementById("mp-sc-styles")) return;
     const style = document.createElement("style");
     style.id = "mp-sc-styles";
     style.textContent = CSS;
     document.head.appendChild(style);
-    stylesInjected = true;
   }
 
   const ON_SURFACE = "rgb(var(--v-theme-on-surface))";
   const CSS = [
-    ".mp-sc-panel{margin-top:12px;padding:16px;border-radius:8px;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border:1px solid rgba(var(--v-theme-on-surface),var(--v-border-opacity));font-family:inherit}",
-    ".mp-sc-header{margin-bottom:12px}",
+    ".mp-sc-panel{margin-top:12px;padding:16px;border-radius:8px;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border:1px solid rgba(var(--v-theme-on-surface),.08);font-family:inherit}",
+    ".mp-sc-header{margin-bottom:8px}",
     ".mp-sc-hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
-    ".mp-sc-title{font-size:14px;font-weight:500;letter-spacing:.0125em;color:rgba(var(--v-theme-on-surface),var(--v-high-emphasis-opacity))}",
+    ".mp-sc-title{font-size:16px;font-weight:500;letter-spacing:.0125em;color:rgba(var(--v-theme-on-surface),var(--v-high-emphasis-opacity))}",
     ".mp-sc-badge{font-size:11px;padding:1px 8px;border-radius:10px;background:rgba(var(--v-theme-on-surface),.12);color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
     ".mp-sc-badge--on{background:rgba(var(--v-theme-primary),.16);color:rgb(var(--v-theme-primary))}",
-    ".mp-sc-clear{margin-left:auto;background:none;border:1px solid rgba(var(--v-theme-on-surface),.38);border-radius:4px;padding:2px 10px;font:inherit;font-size:12px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer}",
-    ".mp-sc-clear:hover{border-color:rgb(var(--v-theme-primary));color:rgb(var(--v-theme-primary))}",
-    ".mp-sc-oneshot{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;user-select:none}",
-    ".mp-sc-tabs{display:flex;gap:16px;margin-bottom:16px;border-bottom:1px solid rgba(var(--v-theme-on-surface),var(--v-border-opacity))}",
-    ".mp-sc-tabbtn{background:none;border:none;padding:8px 4px;margin-bottom:-1px;font:inherit;font-size:14px;font-weight:500;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;border-bottom:2px solid transparent}",
+    ".mp-sc-clear{margin-left:auto;background:none;border:none;border-radius:4px;padding:4px 8px;font:inherit;font-size:14px;font-weight:500;color:rgb(var(--v-theme-primary));cursor:pointer}",
+    ".mp-sc-clear:hover{background:rgba(var(--v-theme-primary),.08)}",
+    ".mp-sc-oneshot{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:14px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;user-select:none}",
+    // Vuetify-like tabs: 48px height, 16px horizontal padding
+    ".mp-sc-tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid rgba(var(--v-theme-on-surface),.12);min-height:48px}",
+    ".mp-sc-tabbtn{background:none;border:none;padding:0 16px;margin:0 0 -1px;font:inherit;font-size:14px;font-weight:500;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;border-bottom:2px solid transparent;min-height:48px}",
     ".mp-sc-tabbtn--active{color:rgb(var(--v-theme-primary));border-bottom-color:rgb(var(--v-theme-primary))}",
     ".mp-sc-grid{display:grid;grid-template-columns:1fr;column-gap:12px}",
     "@media (min-width:700px){.mp-sc-grid{grid-template-columns:repeat(2,1fr)}}",
     "@media (min-width:1100px){.mp-sc-grid{grid-template-columns:repeat(3,1fr)}}",
     ".mp-sc-field{position:relative;padding-top:6px;padding-bottom:0;min-width:0}",
     ".mp-sc-ico{display:flex;align-items:center;justify-content:center;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));margin-right:8px}",
-    // outlined field shell shared by text + dropdown
-    ".mp-sc-tf__field,.mp-sc-dd__field{display:flex;align-items:center;min-height:40px;padding:6px 10px;border:1px solid rgba(var(--v-theme-on-surface),.38);border-radius:4px;background:transparent;transition:border-color .15s,border-width .15s;cursor:pointer}",
+    // outlined field shell: native Vuetify default height is 56px
+    ".mp-sc-tf__field,.mp-sc-dd__field{position:relative;display:flex;align-items:center;box-sizing:border-box;min-height:56px;padding:18px 16px 6px;border:1px solid rgba(var(--v-theme-on-surface),.38);border-radius:4px;background:transparent;transition:border-color .15s,border-width .15s}",
+    ".mp-sc-tf__field{cursor:text}",
+    ".mp-sc-dd__field{cursor:pointer}",
     ".mp-sc-tf__field:hover,.mp-sc-dd__field:hover{border-color:rgba(var(--v-theme-on-surface),.6)}",
-    ".mp-sc-dd__field--open{border-color:rgb(var(--v-theme-primary));border-width:2px;padding:5px 9px}",
+    ".mp-sc-tf__field:focus-within,.mp-sc-dd__field:focus-within{border-color:rgb(var(--v-theme-primary));border-width:2px;padding:17px 15px 5px}",
+    ".mp-sc-dd__field.mp-sc-dd--open{border-color:rgb(var(--v-theme-primary));border-width:2px;padding:17px 15px 5px}",
     ".mp-sc-dd__field--loading{opacity:.7}",
-    ".mp-sc-input{flex:1 1 auto;min-width:0;width:100%;border:none;background:transparent;font:inherit;font-size:14px;color:" + ON_SURFACE + ";outline:none;padding:0}",
-    ".mp-sc-dd__value{flex:1 1 auto;min-width:0;font-size:14px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+    ".mp-sc-input{flex:1 1 auto;min-width:0;width:100%;border:none;background:transparent;font:inherit;font-size:16px;color:" + ON_SURFACE + ";outline:none;padding:0;margin:0;box-shadow:none}",
+    ".mp-sc-dd__value{flex:1 1 auto;min-width:0;font-size:16px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
     ".mp-sc-dd__value--ph{color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
     ".mp-sc-dd__arrow{flex:0 0 auto;width:8px;height:8px;margin-left:8px;border-right:2px solid rgba(var(--v-theme-on-surface),.6);border-bottom:2px solid rgba(var(--v-theme-on-surface),.6);transform:rotate(45deg) translateY(-2px);transition:transform .15s}",
     ".mp-sc-dd--open .mp-sc-dd__arrow{transform:rotate(225deg) translateY(-2px)}",
-    ".mp-sc-label{position:absolute;left:10px;top:-7px;padding:0 4px;font-size:12px;line-height:1;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));background:rgb(var(--v-theme-surface));pointer-events:none;transition:color .15s}",
-    ".mp-sc-dd--open .mp-sc-label,.mp-sc-dd__field:focus .mp-sc-label,.mp-sc-tf__field:focus-within .mp-sc-label{color:rgb(var(--v-theme-primary))}",
+    // floating label: inside when empty, on the outline when filled/focused
+    ".mp-sc-label{position:absolute;left:12px;top:50%;transform:translateY(-50%);margin:0;padding:0;font-size:16px;line-height:1;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));background:transparent;pointer-events:none;white-space:nowrap;transition:top .15s,font-size .15s,color .15s,background .15s,padding .15s}",
+    ".mp-sc-has-icon .mp-sc-label{left:44px}",
+    ".mp-sc-tf__field:focus-within .mp-sc-label,.mp-sc-dd__field:focus-within .mp-sc-label,.mp-sc-dd--filled .mp-sc-label,.mp-sc-dd--open .mp-sc-label,.mp-sc-input:not(:placeholder-shown)+.mp-sc-label{top:0;font-size:12px;background:rgb(var(--v-theme-surface));padding:0 4px}",
+    ".mp-sc-tf__field:focus-within .mp-sc-label,.mp-sc-dd__field:focus-within .mp-sc-label,.mp-sc-dd--open .mp-sc-label{color:rgb(var(--v-theme-primary))}",
+    ".mp-sc-dd__field:not(.mp-sc-dd--open):not(:focus-within) .mp-sc-dd__value--ph:not(.mp-sc-dd__value--error){color:transparent}",
     ".mp-sc-hint{font-size:12px;line-height:1.4;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));padding:4px 2px 10px}",
     // teleported menu
     // NOTE: background must be --v-theme-surface. In MP's glass theme
     // --v-theme-surface-bright is 204,191,214 (light lavender) while
     // --v-theme-on-surface is 242,245,250 (near white) -> unreadable menu.
     ".mp-sc-menu{z-index:3000;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border-radius:4px;border:1px solid rgba(var(--v-theme-on-surface),.12);box-shadow:0 6px 20px rgba(0,0,0,.55);overflow:hidden}",
-    ".mp-sc-menu__list{max-height:260px;overflow-y:auto;padding:4px 0}",
-    ".mp-sc-menu__item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:14px;line-height:1.4;cursor:pointer;white-space:nowrap}",
+    ".mp-sc-menu__list{max-height:260px;overflow-y:auto;padding:8px 0}",
+    ".mp-sc-menu__item{display:flex;align-items:center;gap:8px;padding:10px 16px;font-size:16px;line-height:1.4;cursor:pointer;white-space:nowrap}",
     ".mp-sc-menu__item:hover{background:rgba(var(--v-theme-on-surface),.08)}",
     ".mp-sc-menu__item--sel{color:rgb(var(--v-theme-primary))}",
-    ".mp-sc-cb{flex:0 0 auto;width:16px;height:16px;border-radius:3px;border:2px solid rgba(var(--v-theme-on-surface),.54)}",
+    ".mp-sc-cb{flex:0 0 auto;width:18px;height:18px;border-radius:2px;border:2px solid rgba(var(--v-theme-on-surface),.54)}",
     ".mp-sc-cb--on{background:rgb(var(--v-theme-primary));border-color:rgb(var(--v-theme-primary))}",
-    // switch row
+    // Vuetify-like switch
     ".mp-sc-switchrow{display:flex;flex-wrap:wrap;gap:8px 28px;padding:4px 2px 12px}",
-    ".mp-sc-sw{display:flex;align-items:flex-start;gap:8px;cursor:pointer;user-select:none;flex:1 1 240px;min-width:0}",
+    ".mp-sc-sw{position:relative;display:flex;flex-wrap:wrap;align-items:flex-start;gap:0 8px;cursor:pointer;user-select:none;flex:1 1 240px;min-width:0}",
     ".mp-sc-checkbox{width:20px;height:20px;flex:0 0 auto;margin:0;accent-color:rgb(var(--v-theme-primary));cursor:pointer}",
-    ".mp-sc-sw__text{font-size:14px;line-height:20px;white-space:nowrap}",
-    ".mp-sc-sw__hint{font-size:12px;line-height:1.35;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));flex:1 1 100%;padding-left:28px}",
+    ".mp-sc-switch-input{position:absolute;opacity:0;width:0;height:0;margin:0;pointer-events:none}",
+    ".mp-sc-sw__track{position:relative;flex:0 0 auto;width:36px;height:14px;margin-top:3px;border-radius:7px;background:rgba(var(--v-theme-on-surface),.38);transition:background .2s}",
+    ".mp-sc-sw__thumb{position:absolute;top:-3px;left:-2px;width:20px;height:20px;border-radius:50%;background:rgb(var(--v-theme-surface));box-shadow:0 1px 3px rgba(0,0,0,.35);transition:transform .2s,background .2s}",
+    ".mp-sc-switch-input:checked + .mp-sc-sw__track{background:rgba(var(--v-theme-primary),.54)}",
+    ".mp-sc-switch-input:checked + .mp-sc-sw__track .mp-sc-sw__thumb{transform:translateX(16px);background:rgb(var(--v-theme-primary))}",
+    ".mp-sc-switch-input:focus-visible + .mp-sc-sw__track{outline:2px solid rgba(var(--v-theme-primary),.5);outline-offset:2px}",
+    ".mp-sc-sw__text{font-size:16px;line-height:20px;white-space:nowrap}",
+    ".mp-sc-sw__hint{font-size:12px;line-height:1.35;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));flex:1 1 100%;padding-left:44px}",
   ].join("");
 
   const DIALOG_SELECTOR = '.v-dialog, .v-overlay__content, [role="dialog"]';
 
   function tryInject(root) {
     if (!root) return;
+    // Cheap self-heal: if an SPA re-render dropped the <style> tag while the
+    // panel survived, this restores it on the next scan.
+    injectStyles();
     const candidates = [];
     if (root.nodeType === 1 && root.matches && root.matches(DIALOG_SELECTOR)) {
       candidates.push(root);
@@ -876,7 +932,7 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v16] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v17] injected into " + injected + " dialog(s)");
   }
 
   let injectTimer = null;
@@ -905,16 +961,16 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v16] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v17] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v16] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v17] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v16] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v17] FATAL", e); }
 })();

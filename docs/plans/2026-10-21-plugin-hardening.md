@@ -100,3 +100,20 @@ python -c "import json; d=json.load(open('package.v3.json')); print({k: v['versi
 
 验证：`node --check`；jsdom 新增 3 组用例（主端点/降级、名称/ID 手填与未识别拒绝、API 全失败时用缓存列表手填）及原有 4 组全部通过；Python harness 6 项全部通过。
 
+## 追加修复：表单风格对齐原生 Vuetify（0.15.2）
+
+问题：注入面板的视觉和 MP 原生订阅对话框仍不一致，用户怀疑 CSS 没加载。
+
+结论：CSS 不是外部文件，也没有加载失败；样式由 patch 在 `buildPanel()` 时内联写入 `<style id="mp-sc-styles">`。差异来自自绘控件：40px 字段、14px 文字、标签始终浮在边框上、布尔项用原生方框 checkbox；另外 teleport 到 `body` 的菜单可能丢失 `v-theme--*` 主题类。
+
+修法：
+
+- 字段改为原生默认 56px outlined 高度，`box-sizing:border-box`，输入文字 16px；
+- 标签改为浮动标签：空值时在框内，聚焦/有值时浮到边框并缩为 12px；带前置图标的字段标签对齐到图标右侧；
+- 布尔项改为 Vuetify 风格 switch（track + thumb），保留原生 checkbox 的一次性开关；
+- tab 改为 48px 高、16px 内边距，清空按钮改为 text button，面板边框减弱；
+- 菜单打开时复制当前 `v-theme--*` 类，保证 CSS 变量在 `body` 下仍可解析；
+- `injectStyles()` 每次检查 DOM，不再依赖一次性布尔标记。
+
+验证：`node --check`；jsdom 全部 8 组通过（新增主题类继承、switch 结构、填充态标签）；浏览器预览实测字段 56px、浮动标签 12px、switch track 36×14。
+
