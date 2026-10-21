@@ -6,16 +6,16 @@
 
 ## 批次 1：Jackett 正确性（v1.1.2）
 
-- [ ] 修 `_http_get_text()` 中 `url_path` 未定义导致的 302 重试 `NameError`
-- [ ] 302 重试改用 60s 超时，并在重试后再次检查 302
-- [ ] 分页参数生效：`page -> offset`，固定 `limit=100`
-- [ ] `site` 改为稳定 ID（`crc32` + 保留区间），不再依赖进程随机 `hash()`
-- [ ] 跨 indexer 结果去重（按 `enclosure/page_url`，保留 seeders 高者）
-- [ ] 异常日志脱敏，避免 httpx 异常字符串带出 `apikey`
-- [ ] 索引器列表增加 5 分钟 TTL 缓存
-- [ ] 扇出并发限制为 6，整体搜索 90s 截止，保留已完成结果
-- [ ] 同步钩子在已有事件循环中调用时不再 `asyncio.run` 崩溃
-- [ ] `get_page()` 展示最近一次搜索摘要和最近错误
+- [x] 修 `_http_get_text()` 中 `url_path` 未定义导致的 302 重试 `NameError`
+- [x] 302 重试改用 60s 超时，并在重试后再次检查 302
+- [x] 分页参数生效：`page -> offset`，固定 `limit=100`
+- [x] `site` 改为稳定 ID（`crc32` + 保留区间），不再依赖进程随机 `hash()`
+- [x] 跨 indexer 结果去重（按 `enclosure/page_url`，保留 seeders 高者）
+- [x] 异常日志脱敏，避免 httpx 异常字符串带出 `apikey`
+- [x] 索引器列表增加 5 分钟 TTL 缓存
+- [x] 扇出并发限制为 6，整体搜索 90s 截止，保留已完成结果
+- [x] 同步钩子在已有事件循环中调用时不再 `asyncio.run` 崩溃
+- [x] `get_page()` 展示最近一次搜索摘要和最近错误
 
 验证：
 
@@ -26,18 +26,18 @@ python -c "import json; json.load(open('package.v3.json'))"
 
 ## 批次 2：SubscribeConfigurator 功能修复（v0.15.0）
 
-- [ ] 把 `default_start_episode` / `auto_apply_defaults` 注入 patch.js，并在配置变化时重写
-- [ ] 多选下拉每次点击从 `localStorage` 重新读取，修复连选覆盖；选择后刷新显示
-- [ ] `downloader` 恢复为单选，`sites` 保持多选
-- [ ] 关闭“启用前端劫持”时立即还原 `index.html` 并删除 patch.js
-- [ ] 异步下拉加载失败时提供真正的手填入口（prompt）
-- [ ] 覆盖字段加白名单与类型归一化
-- [ ] one-shot 默认开启（用户可显式关闭），清空按钮不重置该偏好
-- [ ] 修复 `tryInject()` 先删面板后判断 `__mp_sc_patched` 的顺序
-- [ ] MutationObserver 变更合并 + 100ms 防抖
-- [ ] 异步选项请求加 5 分钟缓存；401 给出明确提示
-- [ ] `index.html` / patch.js 改为原子写
-- [ ] 版本/配置指纹不一致、patch 文件缺失、marker 丢失时自动重打
+- [x] 把 `default_start_episode` / `auto_apply_defaults` 注入 patch.js，并在配置变化时重写
+- [x] 多选下拉每次点击从 `localStorage` 重新读取，修复连选覆盖；选择后刷新显示
+- [x] `downloader` 恢复为单选，`sites` 保持多选
+- [x] 关闭“启用前端劫持”时立即还原 `index.html` 并删除 patch.js
+- [x] 异步下拉加载失败时提供真正的手填入口（prompt）
+- [x] 覆盖字段加白名单与类型归一化
+- [x] one-shot 默认开启（用户可显式关闭），清空按钮不重置该偏好
+- [x] 修复 `tryInject()` 先删面板后判断 `__mp_sc_patched` 的顺序
+- [x] MutationObserver 变更合并 + 100ms 防抖
+- [x] 异步选项请求加 5 分钟缓存；401 给出明确提示
+- [x] `index.html` / patch.js 改为原子写
+- [x] 版本/配置指纹不一致、patch 文件缺失、marker 丢失时自动重打
 
 验证：
 
@@ -48,11 +48,11 @@ node --check plugins.v3/subscribeconfigurator/patch/_subscribe_patch.js
 
 ## 批次 3：发布层收口
 
-- [ ] README 版本与插件列表同步到 Jackett 1.1.2 / 订阅增强 0.15.0
-- [ ] 新增 `CHANGELOG.md`，记录每个版本改了什么
-- [ ] 补 `icons/subscribeconfigurator.png`，修掉图标 404
-- [ ] 新增 CI：Python 编译、JS 语法、JSON 解析
-- [ ] `package.v3.json` 写入两个新版本的 `history`
+- [x] README 版本与插件列表同步到 Jackett 1.1.2 / 订阅增强 0.15.0
+- [x] 新增 `CHANGELOG.md`，记录每个版本改了什么
+- [x] 补 `icons/subscribeconfigurator.png`，修掉图标 404
+- [x] 新增 CI：Python 编译、JS 语法、JSON 解析
+- [x] `package.v3.json` 写入两个新版本的 `history`
 
 验证：
 
@@ -71,3 +71,19 @@ python -c "import json; d=json.load(open('package.v3.json')); print({k: v['versi
 - 每个批次至少一个 commit，commit message 写清“问题 -> 修法 -> 验证”；
 - README / CHANGELOG / `package.v3.json.history` 三处版本信息保持一致；
 - 不把密钥、内网地址、NAS 凭证写入仓库。
+
+## 完成记录
+
+- Jackett 1.1.2：`1e5aabf`
+- 订阅增强 0.15.0：`828f5e7`
+- 发布层收口（README / CHANGELOG / 图标 / CI / 本计划勾选）：本批次提交
+
+验证结果：
+
+- `python -m py_compile` 两个插件均通过；
+- `node --check` 前端 patch 通过；
+- `package.v3.json` 解析通过，版本为 Jackett 1.1.2 / SubscribeConfigurator 0.15.0；
+- Jackett 本地 smoke harness 7 项通过（site ID 稳定性、日志脱敏、去重、Torznab 解析、分页 offset、并发上限、同步钩子安全）；
+- 订阅增强 Python harness 6 项通过（注入/幂等、配置变更重写、patch.js 缺失自愈、禁用还原、无临时文件、0.14.0 marker 升级清理）；
+- 订阅增强 jsdom harness 4 组通过（纯函数/白名单、面板注入与重复扫描、多选累加/取消、下载器单选、401 手填、一次性清理、传输层合并）。
+

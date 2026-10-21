@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python syntax
+        run: |
+          python -m py_compile plugins.v3/jackett/__init__.py
+          python -m py_compile plugins.v3/subscribeconfigurator/__init__.py
+
+      - name: Version metadata consistency
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import re
+
+          pkg = json.loads(pathlib.Path("package.v3.json").read_text(encoding="utf-8"))
+          mapping = {
+              "Jackett": "plugins.v3/jackett/__init__.py",
+              "SubscribeConfigurator": "plugins.v3/subscribeconfigurator/__init__.py",
+          }
+          for key, path in mapping.items():
+              text = pathlib.Path(path).read_text(encoding="utf-8")
+              match = re.search(r'plugin_version\s*=\s*"([^"]+)"', text)
+              assert match, f"plugin_version not found in {path}"
+              assert match.group(1) == pkg[key]["version"], (
+                  f"{key}: plugin_version={match.group(1)} package.v3.json={pkg[key]['version']}"
+              )
+          print("version metadata OK")
+          PY
+
+      - name: package.v3.json parses
+        run: python -c "import json; json.load(open('package.v3.json', encoding='utf-8'))"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Frontend patch syntax
+        run: node --check plugins.v3/subscribeconfigurator/patch/_subscribe_patch.js
