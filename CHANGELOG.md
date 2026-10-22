@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-23
+
+### 订阅增强 0.15.3
+
+修复「手机打开订阅对话框后无法上下滚动」：
+
+- 根因：面板注入目标可能落到 `.v-overlay__content`，而 Vuetify 的滚动容器是 `.v-card-text`（`.v-dialog--scrollable > .v-overlay__content > .v-card > .v-card-text`）。面板在滚动区外时，手机上会超出对话框可视区域，页面本身又被 overlay 锁定，表现为完全滚不动。
+- 注入改为优先 `.v-card-text`，其次 `.v-card`；卡片尚未渲染时本轮跳过，交给下一次 MutationObserver 扫描重试，不再退回 `.v-overlay__content`。
+- 窄屏（≤699px）面板默认折叠，只显示「订阅增强」标题、已填徽标、清空、展开/收起。展开后由原生 `.v-card-text` 滚动，面板内部不再设置 `max-height` / `overflow-y`，避免嵌套滚动互相抢手势。
+- 移动端紧凑布局：单列字段、48px 字段高度、15px 输入文字、较小标签/提示、tab 吸顶；桌面布局保持不变。
+
+验证：Node `--check`；jsdom 回归（面板唯一、父节点为 `.v-card-text`、不直接挂在 `.v-overlay__content` 下、移动端默认折叠、展开/收起按钮存在）；390×844 浏览器预览确认 `.v-card-text` 可滚动且「提交订阅」按钮固定可见。
+
 ## 2026-10-21
 
 ### 订阅增强 0.15.2

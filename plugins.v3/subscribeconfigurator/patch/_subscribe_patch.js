@@ -1,4 +1,13 @@
-/* SubscribeConfigurator — frontend patch v17
+/* SubscribeConfigurator — frontend patch v18
+ * v18 fixes:
+ *   1. Mobile: the injected panel starts collapsed on narrow screens so it
+ *      cannot fill the whole subscription dialog. The header keeps the title,
+ *      badge and a 展开/收起 toggle; the expanded panel scrolls with the
+ *      native `.v-card-text` container instead of adding a nested scroller.
+ *   2. Inject into `.v-card-text` (Vuetify's scroll area) instead of
+ *      `.v-overlay__content`; this is what made phones unable to scroll.
+ *   3. Compact mobile spacing: single-column fields, 48px field height, smaller
+ *      labels/hints, sticky tabs and a shorter title ("订阅增强").
  * v17 fixes:
  *   1. Match the native Vuetify form style: 56px outlined fields, 16px input
  *      text, floating 12px labels, icon-aware label position, native-like
@@ -26,7 +35,7 @@
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const LS_SITE_ITEMS_KEY = "mp_sc_site_items";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
-  const PANEL_VERSION = "v17";
+  const PANEL_VERSION = "v18";
   const API_BASE = "/api/v1";
   const OPTION_TTL_MS = 5 * 60 * 1000;
   const OPTION_CACHE = {};
@@ -197,7 +206,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v17] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v18] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -219,7 +228,7 @@
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
             merged = true;
-            console.info("[subscribeconfigurator v17] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v18] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -571,7 +580,7 @@
             : "加载失败，点此重试/手填";
           valEl.classList.add("mp-sc-dd__value--ph");
           valEl.classList.add("mp-sc-dd__value--error");
-          console.warn("[subscribeconfigurator v17] load " + field.api + " failed", err && err.status);
+          console.warn("[subscribeconfigurator v18] load " + field.api + " failed", err && err.status);
         });
     }
 
@@ -738,27 +747,44 @@
   function buildPanel() {
     const overrides = readOverrides();
     const defaultEp = readDefaultEpisode();
+    const isMobile = !!(window.matchMedia && window.matchMedia("(max-width:699px)").matches);
 
-    const panel = el("div", { [PANEL_MARKER]: PANEL_VERSION, class: "mp-sc-panel" });
+    const panel = el("div", {
+      [PANEL_MARKER]: PANEL_VERSION,
+      class: "mp-sc-panel" + (isMobile ? " mp-sc-panel--collapsed" : ""),
+    });
 
     const header = el("div", { class: "mp-sc-header" });
     const hrow = el("div", { class: "mp-sc-hrow" });
     const hasStartOverride = Object.prototype.hasOwnProperty.call(overrides, "start_episode");
     const activeCount = Object.keys(overrides).length + (defaultEp > 0 && !hasStartOverride ? 1 : 0);
-    hrow.appendChild(el("div", { class: "mp-sc-title", text: "订阅增强（SubscribeConfigurator）" }));
+    hrow.appendChild(el("div", { class: "mp-sc-title",
+      text: isMobile ? "订阅增强" : "订阅增强（SubscribeConfigurator）" }));
     hrow.appendChild(el("span", { class: "mp-sc-badge" + (activeCount ? " mp-sc-badge--on" : ""),
       text: activeCount ? ("已填 " + activeCount + " 项") : "未填写" }));
-    const clearBtn = el("button", { type: "button", class: "mp-sc-clear", text: "清空全部" });
+    const clearBtn = el("button", { type: "button", class: "mp-sc-clear",
+      text: isMobile ? "清空" : "清空全部" });
     clearBtn.addEventListener("click", function (ev) {
       ev.stopPropagation();
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v17] overrides cleared by user");
+      console.info("[subscribeconfigurator v18] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
+    const toggleBtn = el("button", { type: "button", class: "mp-sc-toggle",
+      text: isMobile ? "展开" : "收起" });
+    toggleBtn.setAttribute("aria-expanded", isMobile ? "false" : "true");
+    toggleBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      const collapsed = panel.classList.toggle("mp-sc-panel--collapsed");
+      toggleBtn.textContent = collapsed ? "展开" : "收起";
+      toggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    });
+    hrow.appendChild(toggleBtn);
     header.appendChild(hrow);
 
+    const body = el("div", { class: "mp-sc-body" });
     const osLabel = el("label", { class: "mp-sc-oneshot" });
     const osInput = el("input", { type: "checkbox", class: "mp-sc-checkbox" });
     osInput.checked = isOneShot();
@@ -772,8 +798,9 @@
     });
     osLabel.appendChild(osInput);
     osLabel.appendChild(el("span", { text: "一次性（默认开启，提交一次后自动清空）" }));
-    header.appendChild(osLabel);
+    body.appendChild(osLabel);
     panel.appendChild(header);
+    panel.appendChild(body);
 
     const tabs = el("div", { class: "mp-sc-tabs" });
     const basicPane = el("div", { class: "mp-sc-pane" });
@@ -799,9 +826,9 @@
     }
     tabs.appendChild(tabBtn("基础", basicPane, true));
     tabs.appendChild(tabBtn("进阶", advPane, false));
-    panel.appendChild(tabs);
-    panel.appendChild(basicPane);
-    panel.appendChild(advPane);
+    body.appendChild(tabs);
+    body.appendChild(basicPane);
+    body.appendChild(advPane);
 
     injectStyles();
     return panel;
@@ -820,14 +847,17 @@
 
   const ON_SURFACE = "rgb(var(--v-theme-on-surface))";
   const CSS = [
-    ".mp-sc-panel{margin-top:12px;padding:16px;border-radius:8px;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border:1px solid rgba(var(--v-theme-on-surface),.08);font-family:inherit}",
+    ".mp-sc-panel{margin-top:12px;padding:16px;border-radius:8px;background:rgb(var(--v-theme-surface));color:" + ON_SURFACE + ";border:1px solid rgba(var(--v-theme-on-surface),.08);font-family:inherit;box-sizing:border-box;max-width:100%;flex:0 0 auto;touch-action:pan-y}",
     ".mp-sc-header{margin-bottom:8px}",
     ".mp-sc-hrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
-    ".mp-sc-title{font-size:16px;font-weight:500;letter-spacing:.0125em;color:rgba(var(--v-theme-on-surface),var(--v-high-emphasis-opacity))}",
-    ".mp-sc-badge{font-size:11px;padding:1px 8px;border-radius:10px;background:rgba(var(--v-theme-on-surface),.12);color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
+    ".mp-sc-title{font-size:16px;font-weight:500;letter-spacing:.0125em;color:rgba(var(--v-theme-on-surface),var(--v-high-emphasis-opacity));flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".mp-sc-badge{flex:0 0 auto;font-size:11px;padding:1px 8px;border-radius:10px;background:rgba(var(--v-theme-on-surface),.12);color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity))}",
     ".mp-sc-badge--on{background:rgba(var(--v-theme-primary),.16);color:rgb(var(--v-theme-primary))}",
-    ".mp-sc-clear{margin-left:auto;background:none;border:none;border-radius:4px;padding:4px 8px;font:inherit;font-size:14px;font-weight:500;color:rgb(var(--v-theme-primary));cursor:pointer}",
+    ".mp-sc-clear{flex:0 0 auto;margin-left:auto;background:none;border:none;border-radius:4px;padding:4px 8px;font:inherit;font-size:14px;font-weight:500;color:rgb(var(--v-theme-primary));cursor:pointer}",
     ".mp-sc-clear:hover{background:rgba(var(--v-theme-primary),.08)}",
+    ".mp-sc-toggle{display:none;flex:0 0 auto;background:none;border:none;border-radius:4px;padding:4px 8px;font:inherit;font-size:14px;font-weight:500;color:rgb(var(--v-theme-primary));cursor:pointer}",
+    ".mp-sc-toggle:hover{background:rgba(var(--v-theme-primary),.08)}",
+    ".mp-sc-body{min-width:0}",
     ".mp-sc-oneshot{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:14px;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));cursor:pointer;user-select:none}",
     // Vuetify-like tabs: 48px height, 16px horizontal padding
     ".mp-sc-tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid rgba(var(--v-theme-on-surface),.12);min-height:48px}",
@@ -882,6 +912,34 @@
     ".mp-sc-switch-input:focus-visible + .mp-sc-sw__track{outline:2px solid rgba(var(--v-theme-primary),.5);outline-offset:2px}",
     ".mp-sc-sw__text{font-size:16px;line-height:20px;white-space:nowrap}",
     ".mp-sc-sw__hint{font-size:12px;line-height:1.35;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));flex:1 1 100%;padding-left:44px}",
+    // Mobile: keep the panel compact and let the native `.v-card-text` scroll
+    // container handle vertical scrolling. Do NOT give `.mp-sc-body` its own
+    // max-height/overflow; nested scroll areas are what made the dialog feel
+    // unscrollable on phones. These rules must stay last so they override the
+    // base field/tab/switch rules above.
+    "@media (max-width:699px){",
+    ".mp-sc-panel{padding:12px;margin-top:8px}",
+    ".mp-sc-header{margin-bottom:6px}",
+    ".mp-sc-hrow{gap:6px;flex-wrap:nowrap}",
+    ".mp-sc-title{font-size:15px}",
+    ".mp-sc-badge{font-size:10px;padding:1px 6px}",
+    ".mp-sc-clear{font-size:13px;padding:2px 4px}",
+    ".mp-sc-toggle{display:inline-flex;align-items:center;font-size:13px;padding:2px 4px}",
+    ".mp-sc-panel--collapsed .mp-sc-body{display:none}",
+    ".mp-sc-oneshot{font-size:12px;margin-top:0;margin-bottom:6px;align-items:flex-start}",
+    ".mp-sc-tabs{position:sticky;top:0;z-index:2;background:rgb(var(--v-theme-surface));margin-bottom:8px;min-height:40px}",
+    ".mp-sc-tabbtn{min-height:40px;padding:0 12px;font-size:13px}",
+    ".mp-sc-tf__field,.mp-sc-dd__field{min-height:48px;padding:14px 12px 4px}",
+    ".mp-sc-tf__field:focus-within,.mp-sc-dd__field:focus-within,.mp-sc-dd__field.mp-sc-dd--open{padding:13px 11px 3px}",
+    ".mp-sc-label{font-size:14px}",
+    ".mp-sc-has-icon .mp-sc-label{left:40px}",
+    ".mp-sc-input,.mp-sc-dd__value{font-size:15px}",
+    ".mp-sc-hint{padding:2px 2px 6px;font-size:11px}",
+    ".mp-sc-switchrow{gap:6px 16px;padding-bottom:8px}",
+    ".mp-sc-sw{flex-basis:100%}",
+    ".mp-sc-sw__text{font-size:15px}",
+    ".mp-sc-sw__hint{padding-left:0}",
+    "}",
   ].join("");
 
   const DIALOG_SELECTOR = '.v-dialog, .v-overlay__content, [role="dialog"]';
@@ -928,12 +986,20 @@
         if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) return;
       }
       if (!isAdd) return;
-      const target = dialog.querySelector(".v-card-text, .v-card, form, .v-overlay__content") || dialog;
+      // Inject into the native scroll container instead of the dialog root.
+      // `.v-card-text` is the element Vuetify gives `overflow-y:auto` to
+      // (`.v-dialog--scrollable > .v-overlay__content > .v-card > .v-card-text`).
+      // Appending to `.v-overlay__content` puts the panel outside that scroll
+      // area; on mobile the dialog then cannot scroll to the panel or the
+      // submit button. If the card has not rendered yet, skip this pass and
+      // let the next MutationObserver scan retry.
+      const target = dialog.querySelector(".v-card-text") || dialog.querySelector(".v-card");
+      if (!target) return;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v17] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v18] injected into " + injected + " dialog(s)");
   }
 
   let injectTimer = null;
@@ -957,21 +1023,27 @@
       muts.forEach(function (m) {
         for (let i = 0; i < m.addedNodes.length; i++) {
           const n = m.addedNodes[i];
-          if (n && n.nodeType === 1) scheduleInject(n);
+          if (!n || n.nodeType !== 1) continue;
+          scheduleInject(n);
+          // The dialog card can render after the overlay. If only a descendant
+          // (e.g. .v-card-text) was added, scanning that node alone would miss
+          // the ancestor dialog, so schedule the closest dialog too.
+          const host = n.closest ? n.closest(DIALOG_SELECTOR) : null;
+          if (host && host !== n) scheduleInject(host);
         }
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v17] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v18] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v17] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v18] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v17] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v18] FATAL", e); }
 })();
