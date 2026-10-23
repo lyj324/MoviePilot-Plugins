@@ -2,6 +2,32 @@
 
 ## 2026-10-23
 
+### 订阅增强 0.15.4
+
+安全与健壮性修复（针对内部评审发现的问题）：
+
+- **还原逻辑不再回写整份备份**。此前 `_restore()` 会用 `.bak` 覆盖 `index.html`；MoviePilot 升级镜像后 `/public/index.html` 已被替换成新构建，此时禁用/卸载插件会把前端写回旧版本，旧资源 hash 全部 404（白屏），且 `.bak` 被删除无法恢复。现在只做“外科手术式”清理：按正则移除注入的 `<script defer src="/_subscribe_patch.js...">` 与 marker 注释，其余字节保持不变。
+- 没有 `.bak` 时同样会清掉残留的 `<script>` 标签，不再留下每次页面加载都 404 的死引用；`index.html` 读取或写入失败时保留 `patch.js`，避免造成新的 404。
+- `auth_level` 由 1 改为 2（仅管理员）：插件会改写全局前端文件，普通用户不应能触发。
+- `default_start_episode` 传入非数字/负数不再让 `init_plugin` 抛异常，按 0 处理。
+- 配置指纹纳入 `patch.js` 的 SHA-256：只改前端脚本、不改版本号也会重写部署文件。
+- 前端只拦截 `POST /api/v1/subscribe[/]`，不再误伤 `/api/v1/subscribe/search` 等同样含 `/subscribe` 的接口。
+- 关键词 / 总集数 / 指定季改为“原生表单已提交非空值时优先原生值”，避免上一次遗留的模板静默覆盖用户刚输入的标题。
+- MutationObserver 只重扫对话框节点（或包含对话框的新子树），搜索结果列表大量渲染时不再堆积几百个扫描任务。
+
+验证：`py_compile`；新增 `tests/test_plugins.py` 19 项回归（含“升级后再禁用必须保留新 index.html”“无备份也要清掉 script 标签”“写失败保留 JS”“并发只登录一次”）；jsdom harness 全通过（v19 面板、`.v-card-text` 注入、移动端折叠、一次性提交、接口匹配范围、按标题字段优先级）；`node --check`。
+
+### Jackett 1.1.3
+
+- **搜索预算修正**：单索引器超时 60s→25s、并发 6→8，整体截止改为按索引器数量计算（`ceil(n/8) × 25s`，上限 150s）。此前固定 90s + 60s 超时意味着 27 个索引器只有前 9 个有机会返回，后面的在排队阶段就被取消。
+- 登录 POST 加 `asyncio.Lock`：首次扇出的并发请求只登录一次；transport 失败返回 `False` 并写入 `_last_error`，不再一律 `return True` 掩盖认证错误（`_fetch_indexers` 仍然照常尝试请求，兼容不需要 session 的旧版 Jackett）。
+- 索引器 id 拼进 Torznab path 前做 `quote()`，带空格/斜杠的 id 不再 404。
+- Torznab `<link>` / `<guid>` 仅接受 `http/https/magnet`，阻断 `javascript:` / `file:` 进入 `enclosure`。
+- 索引器列表过滤非 dict / 无 `id` 的条目，结构异常不再抛 `AttributeError`。
+- 表单补回「指定索引器」多选（留空 = 全部，可手填、候选来自最近一次成功获取的列表）；默认地址改为本机占位，不再在公开仓库里写死内网地址。
+
+验证：`py_compile`；新增单测覆盖 URL 编码、协议白名单、索引器列表容错、去重、并发单次登录、超时预算；`python -m unittest discover -s tests`。
+
 ### 订阅增强 0.15.3
 
 修复「手机打开订阅对话框后无法上下滚动」：
