@@ -8,7 +8,8 @@
 2. ``_subscribe_patch.js`` 在浏览器侧做两件事：
    - 拦截 ``fetch POST /api/v1/subscribe``，把 localStorage 里的字段合并到 body
    - MutationObserver 监听 dialog 出现，在表单底部注入额外输入框
-3. ``stop_service`` 时从 .bak 还原 index.html 并删除 patch.js
+3. ``stop_service`` / 关闭插件时只移除注入的 ``<script>`` 与 marker，再删除
+   patch.js（不再整文件回写 .bak，避免把 MoviePilot 升级后的前端写回旧版本）
 """
 from __future__ import annotations
 
@@ -30,12 +31,15 @@ class SubscribeConfigurator(_PluginBase):
     # ── 元数据 ──
     plugin_name = "订阅增强"
     plugin_desc = "在订阅添加对话框注入 start_episode / filter / quality 等字段，添加订阅时即可一次性配置。"
-    plugin_version = "0.15.3"
+    plugin_version = "0.15.4"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeconfigurator_"
     plugin_order = 50  # 后于 Jackett(21)
-    auth_level = 1
+    # This plugin rewrites the *global* /public/index.html, i.e. it changes the
+    # frontend for every logged-in user. It must therefore stay admin-only;
+    # auth_level=1 would let ordinary users trigger those file writes.
+    auth_level = 2
 
     # ── 常量 ──
     # Marker prefix. The version/config suffix lives inside the same HTML
@@ -49,6 +53,20 @@ class SubscribeConfigurator(_PluginBase):
     # Config fingerprint embedded in the script URL + marker, so changing the
     # plugin form (default episode / auto apply) forces a rewrite of patch.js.
     _CFG_RE = re.compile(r"cfg=([0-9a-f]{8,64})")
+    # Removes our injected <script> tag + marker comment (any version/config
+    # suffix). Shared by re-injection and restore, so a restore can never leave
+    # a dead script tag behind and never has to rewrite the whole file.
+    # The pair is matched together (including the newline between them) so a
+    # restore returns the exact original bytes instead of leaving a blank line.
+    _PATCH_BLOCK_RE = re.compile(
+        r'[ \t]*<script defer src="/_subscribe_patch\.js(?:\?[^"]*)?"\s*></script>[ \t]*\r?\n?'
+        r'(?:<!--\s*mp-subscribeconfigurator-patch[^>]*-->'
+        r'(?:\s*\(sc=v[\d.]+(?:;\s*cfg=[0-9a-f]+)?\))?[ \t]*\r?\n?)?'
+        r'|'
+        r'[ \t]*<!--\s*mp-subscribeconfigurator-patch[^>]*-->'
+        r'(?:\s*\(sc=v[\d.]+(?:;\s*cfg=[0-9a-f]+)?\))?[ \t]*\r?\n?',
+        re.MULTILINE,
+    )
 
     # 容器内路径（默认 MP v3 frontend baked 在 /public）
     PUBLIC_DIR = "/public"
@@ -64,7 +82,18 @@ class SubscribeConfigurator(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or {}
         self._enabled = bool(config.get("enabled", True))
-        self._default_start_episode = int(config.get("default_start_episode") or 0)
+        # A non-numeric value must not abort init_plugin: that would take the
+        # whole plugin down (and skip the restore branch below).
+        try:
+            self._default_start_episode = int(config.get("default_start_episode") or 0)
+        except (TypeError, ValueError):
+            logger.warning(
+                "SubscribeConfigurator: default_start_episode 非法（%r），按 0 处理",
+                config.get("default_start_episode"),
+            )
+            self._default_start_episode = 0
+        if self._default_start_episode < 0:
+            self._default_start_episode = 0
         self._auto_apply_defaults = bool(config.get("auto_apply_defaults", False))
 
         if not self._enabled:
@@ -134,14 +163,7 @@ class SubscribeConfigurator(_PluginBase):
         # Strip any older subscribeconfigurator marker/script (any version) so
         # we don't accumulate stale blocks if a previous plugin version was
         # partially cleaned up.
-        old_strip = re.compile(
-            r'<script defer src="/_subscribe_patch\.js(?:\?[^"]*)?"\s*></script>\s*\n?'
-            r'|'
-            r'<!--\s*mp-subscribeconfigurator-patch\s+v\d+(?:\s*\([^)]*\))?\s*-->'
-            r'(?:\s*\(sc=v[\d.]+(?:;\s*cfg=[0-9a-f]+)?\))?',
-            re.MULTILINE,
-        )
-        content = old_strip.sub("", content)
+        content = self._PATCH_BLOCK_RE.sub("", content)
 
         try:
             self._write_patch_js()
@@ -164,25 +186,82 @@ class SubscribeConfigurator(_PluginBase):
         self._restore()
 
     def _restore(self) -> None:
-        """Restore index.html from backup and remove the injected script."""
+        """Remove the injected tag/marker in place, then delete the patch JS.
+
+        Deliberately does **not** write the backup back over index.html: the
+        ``.bak`` is a snapshot from before an injection, while a MoviePilot
+        image upgrade replaces ``/public/index.html`` with a new frontend
+        build. Restoring that snapshot after an upgrade would pin the app to
+        asset hashes that no longer exist (white screen) and delete the only
+        copy of the current index.html.
+
+        If index.html cannot be read, the JS is kept on purpose: deleting it
+        while the ``<script>`` tag is still there would make every page load
+        hit a 404.
+        """
+        bak = self.PUBLIC_INDEX + self.BACKUP_SUFFIX
         try:
-            bak = self.PUBLIC_INDEX + self.BACKUP_SUFFIX
-            if os.path.exists(bak):
-                with open(bak, "r", encoding="utf-8") as f:
-                    original = f.read()
-                self._atomic_write(self.PUBLIC_INDEX, original)
-                os.remove(bak)
-                logger.info("SubscribeConfigurator: 已还原 %s", self.PUBLIC_INDEX)
+            content = None
+            if os.path.isfile(self.PUBLIC_INDEX):
+                with open(self.PUBLIC_INDEX, "r", encoding="utf-8") as f:
+                    content = f.read()
+        except OSError as err:
+            logger.warning(
+                "SubscribeConfigurator: 读取 %s 失败，保留 patch.js 以免页面 404：%s",
+                self.PUBLIC_INDEX,
+                err,
+            )
+            return
+
+        if content is not None:
+            cleaned = self._PATCH_BLOCK_RE.sub("", content)
+            if cleaned != content:
+                try:
+                    self._atomic_write(self.PUBLIC_INDEX, cleaned)
+                    logger.info(
+                        "SubscribeConfigurator: 已移除 %s 中的注入标签",
+                        self.PUBLIC_INDEX,
+                    )
+                except Exception as err:
+                    logger.warning(
+                        "SubscribeConfigurator: 清理 %s 失败，保留 patch.js：%s",
+                        self.PUBLIC_INDEX,
+                        err,
+                    )
+                    return
+
+        try:
             if os.path.exists(self.PUBLIC_PATCH_JS):
                 os.remove(self.PUBLIC_PATCH_JS)
                 logger.info("SubscribeConfigurator: 已删除 %s", self.PUBLIC_PATCH_JS)
-        except Exception as err:
-            logger.warning(f"SubscribeConfigurator: 还原失败：{err}")
+            if os.path.exists(bak):
+                os.remove(bak)
+                logger.info("SubscribeConfigurator: 已删除备份 %s", bak)
+        except OSError as err:
+            logger.warning("SubscribeConfigurator: 清理 patch 文件失败：%s", err)
+
+    @staticmethod
+    def _patch_js_digest() -> str:
+        """SHA-256 of the bundled patch JS.
+
+        Including it in the fingerprint means a JS-only change (same plugin
+        version) still forces a rewrite; without it, init_plugin would see the
+        old ``sc=`` marker, decide "already up to date" and silently keep
+        serving the previous script.
+        """
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "patch", "_subscribe_patch.js")
+        try:
+            with open(path, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()[:12]
+        except OSError:
+            return "missing"
 
     def _config_fingerprint(self) -> str:
         payload = {
             "default_start_episode": self._default_start_episode,
             "auto_apply_defaults": self._auto_apply_defaults,
+            "patch_js": self._patch_js_digest(),
         }
         raw = json.dumps(
             payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -289,9 +368,10 @@ class SubscribeConfigurator(_PluginBase):
                         f"备份文件：{'存在' if bak_exists else '缺失'}\n"
                         f"默认开始集数：{getattr(self, '_default_start_episode', 0)}\n"
                         f"自动套用默认值：{'是' if getattr(self, '_auto_apply_defaults', False) else '否'}\n\n"
-                        "如需手动还原：\n"
-                        f"  cp {self.PUBLIC_INDEX}{self.BACKUP_SUFFIX} {self.PUBLIC_INDEX}\n"
-                        f"  rm {self.PUBLIC_PATCH_JS}"
+                        "关闭或卸载插件会从 index.html 中移除注入的 <script> 与 marker，"
+                        "并删除 patch 脚本，不需要手动还原。\n"
+                        f"备份文件（{self.BACKUP_SUFFIX}）只在注入时生成，供对照用，"
+                        "不会再被自动回写——避免把 MoviePilot 升级后的前端覆盖成旧版本。"
                     ),
                 },
             }

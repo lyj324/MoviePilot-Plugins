@@ -1,4 +1,13 @@
-/* SubscribeConfigurator — frontend patch v18
+/* SubscribeConfigurator — frontend patch v19
+ * v19 fixes:
+ *   1. Only intercept the real add-subscription endpoint
+ *      (`POST /api/v1/subscribe[/]`). The old `url.indexOf("/subscribe")`
+ *      match also caught other subscribe endpoints (e.g. /subscribe/search).
+ *   2. Per-title fields (keyword / total_episode / season) no longer overwrite
+ *      a value the native form already submitted: a template left over from a
+ *      previous add could silently replace the title the user just typed.
+ *   3. MutationObserver only rescans dialog roots (and newly built subtrees
+ *      that contain one), instead of every added element.
  * v18 fixes:
  *   1. Mobile: the injected panel starts collapsed on narrow screens so it
  *      cannot fill the whole subscription dialog. The header keeps the title,
@@ -35,7 +44,7 @@
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const LS_SITE_ITEMS_KEY = "mp_sc_site_items";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
-  const PANEL_VERSION = "v18";
+  const PANEL_VERSION = "v19";
   const API_BASE = "/api/v1";
   const OPTION_TTL_MS = 5 * 60 * 1000;
   const OPTION_CACHE = {};
@@ -52,6 +61,17 @@
   ]);
   const BOOL_MODELS = new Set(["best_version", "best_version_full", "search_imdbid"]);
   const NUM_MODELS = new Set(["total_episode", "start_episode", "season", "search_interval"]);
+  // Per-title values: a leftover template from a previous add must never
+  // replace what the native form already submitted for *this* subscription.
+  const PAYLOAD_PRIORITY_MODELS = new Set(["keyword", "total_episode", "season"]);
+
+  // The add-subscribe endpoint is POST /api/v1/subscribe/ (MP v2/v3). Match
+  // the exact path so endpoints that merely contain "/subscribe" (e.g.
+  // /api/v1/subscribe/search) are not rewritten.
+  function isAddSubscribeUrl(url) {
+    const path = String(url || "").split("#")[0].split("?")[0];
+    return /(^|\/)api\/v1\/subscribe\/?$/.test(path);
+  }
 
   // MP keeps the auth token in localStorage under "auth" -> {token, remember, ...}
   function authHeaders() {
@@ -189,6 +209,15 @@
       const v = normalizeOverride(k, overrides[k]);
       if (v === "" || v === null || v === undefined) continue;
       if (Array.isArray(v) && v.length === 0) continue;
+      // The native form already sent a real value for this per-title field
+      // (i.e. the user typed it in this dialog) -> keep the native value.
+      if (PAYLOAD_PRIORITY_MODELS.has(k)) {
+        const has = Object.prototype.hasOwnProperty.call(payload, k);
+        const native = payload[k];
+        const nativeEmpty = !has || native === "" || native === null ||
+          native === undefined || (Array.isArray(native) && native.length === 0);
+        if (!nativeEmpty) continue;
+      }
       payload[k] = v;
       changed = true;
     }
@@ -206,7 +235,7 @@
   function maybeOneShot() {
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v18] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v19] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -222,13 +251,13 @@
     XMLHttpRequest.prototype.send = function (body) {
       let merged = false;
       try {
-        if ((this.__mpMethod || "") === "POST" && (this.__mpUrl || "").indexOf("/subscribe") !== -1 &&
+        if ((this.__mpMethod || "") === "POST" && isAddSubscribeUrl(this.__mpUrl) &&
             typeof body === "string" && body.charAt(0) === "{") {
           const payload = JSON.parse(body);
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
             merged = true;
-            console.info("[subscribeconfigurator v18] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v19] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -248,7 +277,7 @@
     try {
       const url = typeof resource === "string" ? resource : (resource && resource.url) || "";
       if (((init && init.method) || "GET").toUpperCase() === "POST" &&
-          url.indexOf("/subscribe") !== -1 && init && typeof init.body === "string" &&
+          isAddSubscribeUrl(url) && init && typeof init.body === "string" &&
           init.body.charAt(0) === "{") {
         const payload = JSON.parse(init.body);
         if (mergeOverrides(payload)) {
@@ -580,7 +609,7 @@
             : "加载失败，点此重试/手填";
           valEl.classList.add("mp-sc-dd__value--ph");
           valEl.classList.add("mp-sc-dd__value--error");
-          console.warn("[subscribeconfigurator v18] load " + field.api + " failed", err && err.status);
+          console.warn("[subscribeconfigurator v19] load " + field.api + " failed", err && err.status);
         });
     }
 
@@ -769,7 +798,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v18] overrides cleared by user");
+      console.info("[subscribeconfigurator v19] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     const toggleBtn = el("button", { type: "button", class: "mp-sc-toggle",
@@ -999,7 +1028,7 @@
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v18] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v19] injected into " + injected + " dialog(s)");
   }
 
   let injectTimer = null;
@@ -1024,26 +1053,30 @@
         for (let i = 0; i < m.addedNodes.length; i++) {
           const n = m.addedNodes[i];
           if (!n || n.nodeType !== 1) continue;
-          scheduleInject(n);
-          // The dialog card can render after the overlay. If only a descendant
-          // (e.g. .v-card-text) was added, scanning that node alone would miss
-          // the ancestor dialog, so schedule the closest dialog too.
+          // Our own panel / teleported dropdown: rescanning their dialog would
+          // only find the panel that is already there.
+          if (n.hasAttribute && n.hasAttribute(PANEL_MARKER)) continue;
+          // A teleported overlay can arrive as one fully built subtree, so the
+          // interesting node is either the closest dialog ancestor or a
+          // subtree that contains one. Scanning every added leaf element made
+          // a long result list schedule hundreds of roots per render.
           const host = n.closest ? n.closest(DIALOG_SELECTOR) : null;
-          if (host && host !== n) scheduleInject(host);
+          if (host) { scheduleInject(host); continue; }
+          if (n.querySelector && n.querySelector(DIALOG_SELECTOR)) scheduleInject(n);
         }
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v18] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v19] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v18] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v19] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v18] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v19] FATAL", e); }
 })();

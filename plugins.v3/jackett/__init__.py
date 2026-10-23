@@ -10,7 +10,7 @@ import re
 import time
 import zlib
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import defusedxml.ElementTree as ET
 
@@ -24,10 +24,17 @@ from app.runtime.log import logger
 _PAGE_SIZE = 100
 # Cap simultaneous per-indexer requests so a 30-indexer Jackett install does
 # not open 30 sockets at once and stall the whole search.
-_SEARCH_CONCURRENCY = 6
-# Absolute deadline for one fan-out. Per-request timeout is 60s; this only
-# guards against "many slow indexers" multiplying that by several rounds.
+_SEARCH_CONCURRENCY = 8
+# Per-indexer request timeout. The old 60s value combined with 6-way
+# concurrency meant a 27-indexer Jackett could never finish within the 90s
+# deadline (5 rounds x 60s), so the last rounds were always cancelled before
+# they even started.
+_REQUEST_TIMEOUT = 25.0
+# Safety net only. The real budget is computed from the indexer count so that
+# every indexer gets at least one attempt; this cap keeps a pathological
+# install from holding MP's search chain forever.
 _SEARCH_DEADLINE = 90.0
+_MAX_SEARCH_DEADLINE = 150.0
 # Indexer list changes rarely; fetching it on every search adds a serial RTT.
 _INDEXER_CACHE_TTL = 300.0
 # Synthetic site IDs live in a reserved range, well above MP's real site IDs.
@@ -51,6 +58,21 @@ def _safe_error_text(err: BaseException) -> str:
     httpx exceptions can include the full request URL, including ``apikey=``.
     """
     return re.sub(r"(apikey=)[^&\s]+", r"\1***", str(err), flags=re.IGNORECASE)
+
+
+def _safe_url(value: str) -> str:
+    """Keep only URLs MP can hand to a downloader.
+
+    Torznab feeds are third-party input. A misbehaving/malicious indexer could
+    return ``javascript:`` or ``file:`` links, which would otherwise be stored
+    as ``enclosure``/``page_url`` and later passed downstream.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://", "magnet:?")):
+        return raw
+    return ""
 
 
 def _dedupe_torrents(items: List[TorrentInfo]) -> List[TorrentInfo]:
@@ -90,7 +112,7 @@ class Jackett(_PluginBase):
     plugin_name = "Jackett"
     plugin_desc = "通过 Jackett (Torznab) 接入第三方索引器（1337x/RARBG/nyaa 等）。"
     plugin_icon = "https://raw.githubusercontent.com/Jackett/Jackett/master/src/Jackett.Common/Content/favicon.ico"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324"
     plugin_config_prefix = "jackett_"
@@ -107,6 +129,9 @@ class Jackett(_PluginBase):
     _indexer_cache_at: float = 0.0
     _last_error: str = ""
     _last_search: str = ""
+    # Serializes the login POST: the first fan-out fires several concurrent
+    # requests that would otherwise all see "no cookie" and log in at once.
+    _auth_lock: Optional[asyncio.Lock] = None
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or {}
@@ -129,6 +154,7 @@ class Jackett(_PluginBase):
         self._indexer_cache_at = 0.0
         self._last_error = ""
         self._last_search = ""
+        self._auth_lock = None
 
     def get_state(self) -> bool:
         return self._enabled and bool(self._host) and bool(self._api_key)
@@ -141,7 +167,14 @@ class Jackett(_PluginBase):
         return []
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
-        host_default = "http://192.168.50.55:9117"
+        host_default = "http://127.0.0.1:9117"
+        # Suggestion list for the indexer combobox: whatever the last
+        # successful discovery produced. Empty is fine, the field is free text.
+        known_indexers = [
+            str(ix["id"])
+            for ix in (self._indexer_cache or [])
+            if isinstance(ix, dict) and ix.get("id")
+        ]
         return (
             [
                 {
@@ -178,6 +211,22 @@ class Jackett(_PluginBase):
                             },
                         },
                         {
+                            "component": "VCombobox",
+                            "props": {
+                                "model": "indexers",
+                                "label": "指定索引器（留空 = 全部）",
+                                "multiple": True,
+                                "chips": True,
+                                "clearable": True,
+                                "items": known_indexers,
+                                "hint": (
+                                    "留空表示使用 Jackett 中所有 configured indexer。"
+                                    "可直接输入索引器 ID，多个用逗号分隔；"
+                                    "候选列表来自最近一次成功获取的索引器。"
+                                ),
+                            },
+                        },
+                        {
                             "component": "VAlert",
                             "props": {
                                 "type": "info",
@@ -193,7 +242,7 @@ class Jackett(_PluginBase):
                 "host": host_default,
                 "api_key": "",
                 "password": "",
-                "indexers": "",
+                "indexers": [],
             },
         )
 
@@ -292,13 +341,19 @@ class Jackett(_PluginBase):
             asyncio.create_task(_run(indexer)): indexer
             for indexer in indexers
         }
-        done, pending = await asyncio.wait(
-            task_map.keys(), timeout=_SEARCH_DEADLINE
+        # Budget for "every indexer gets at least one attempt, even if all of
+        # them time out": rounds x per-request timeout. The old fixed 90s cap
+        # silently skipped the tail of a 27-indexer install.
+        rounds = max(1, -(-len(indexers) // _SEARCH_CONCURRENCY))
+        deadline = min(
+            _MAX_SEARCH_DEADLINE,
+            max(_SEARCH_DEADLINE, rounds * _REQUEST_TIMEOUT),
         )
+        done, pending = await asyncio.wait(task_map.keys(), timeout=deadline)
 
         if pending:
             msg = (
-                f"搜索超时（>{_SEARCH_DEADLINE:.0f}s），"
+                f"搜索超时（>{deadline:.0f}s），"
                 f"{len(pending)}/{len(indexers)} 个索引器未完成"
             )
             self._last_error = msg
@@ -335,11 +390,15 @@ class Jackett(_PluginBase):
             self._indexer_cache
             and (now - self._indexer_cache_at) < _INDEXER_CACHE_TTL
         ):
-            return [ix["id"] for ix in self._indexer_cache if ix.get("id")]
+            return self._cached_indexer_ids()
 
         all_indexers = await self._fetch_indexers()
         if all_indexers:
-            self._indexer_cache = all_indexers
+            # Jackett is third-party JSON: keep only well-formed entries so a
+            # shape change cannot raise AttributeError/KeyError mid-search.
+            self._indexer_cache = [
+                ix for ix in all_indexers if isinstance(ix, dict) and ix.get("id")
+            ]
             self._indexer_cache_at = now
         elif self._indexer_cache:
             # Transient failure: a stale list is better than no search at all.
@@ -348,12 +407,23 @@ class Jackett(_PluginBase):
             logger.warning("Jackett: 刷新索引器失败，沿用旧缓存")
         else:
             return []
-        return [ix["id"] for ix in self._indexer_cache if ix.get("id")]
+        return self._cached_indexer_ids()
+
+    def _cached_indexer_ids(self) -> List[str]:
+        return [
+            str(ix["id"])
+            for ix in self._indexer_cache
+            if isinstance(ix, dict) and ix.get("id")
+        ]
 
     async def _fetch_indexers(self) -> List[dict]:
         """List configured Jackett indexers."""
-        if not await self._ensure_authenticated():
-            return []
+        # Best effort: old Jackett builds need no session at all, so the actual
+        # request below is the real test. A hard login failure is logged (and
+        # recorded in _last_error) by _ensure_authenticated() and then shows up
+        # as a 302 / HTML response here instead of being reported as "no
+        # indexers configured".
+        await self._ensure_authenticated()
         url = f"{self._host}/api/v2.0/indexers?configured=true"
         try:
             text = await self._http_get_text(url)
@@ -390,9 +460,25 @@ class Jackett(_PluginBase):
         no session cookie is present. We POST /UI/Dashboard with the configured
         password (or empty when none) to obtain a session cookie, then reuse it
         on every subsequent request.
+
+        Returns ``False`` only when the login request itself failed (no
+        response / transport error); "logged in but server set no cookie" still
+        returns True because older Jackett builds work without a session. The
+        caller must not use this as a "Jackett is configured" test — the actual
+        API request is the source of truth.
         """
         if self._session_cookies:
             return True
+        if self._auth_lock is None:
+            self._auth_lock = asyncio.Lock()
+        # The first fan-out fires _SEARCH_CONCURRENCY requests at once; without
+        # this lock they would all POST /UI/Dashboard concurrently.
+        async with self._auth_lock:
+            if self._session_cookies:
+                return True
+            return await self._login()
+
+    async def _login(self) -> bool:
         url = f"{self._host}/UI/Dashboard"
         try:
             from app.adapters.network.http import AsyncRequestUtils
@@ -403,32 +489,38 @@ class Jackett(_PluginBase):
                 data={"password": self._password},
                 follow_redirects=False,
             )
-            if response is None:
-                logger.warning("Jackett: 登录 POST 返回 None")
-                return True
-            cookies = {}
-            resp_cookies = getattr(response, "cookies", None)
-            if resp_cookies is not None:
-                try:
-                    cookies = {k: v for k, v in resp_cookies.items()}
-                except Exception:
-                    try:
-                        cookies = dict(resp_cookies)
-                    except Exception:
-                        cookies = {}
-            status = getattr(response, "status_code", None)
-            logger.info(
-                f"Jackett: 登录 POST 收到 status={status}, 拿到 {len(cookies)} 个 cookie, "
-                f"keys={[c for c in cookies.keys()][:3]}"
-            )
-            if cookies:
-                self._session_cookies = cookies
-            return True
         except Exception as err:
+            self._last_error = f"Jackett 登录失败: {type(err).__name__}"
             logger.warning(
-                f"Jackett 登录失败（继续尝试无 cookie 模式）：{_safe_error_text(err)}"
+                f"Jackett 登录请求失败（继续尝试无 cookie 模式）：{_safe_error_text(err)}"
             )
-        return True  # 不阻塞；很多 Jackett 老版本不需要 session
+            return False
+        if response is None:
+            self._last_error = "Jackett 登录请求无响应"
+            logger.warning("Jackett: 登录 POST 返回 None")
+            return False
+
+        cookies = {}
+        resp_cookies = getattr(response, "cookies", None)
+        if resp_cookies is not None:
+            try:
+                cookies = {k: v for k, v in resp_cookies.items()}
+            except Exception:
+                try:
+                    cookies = dict(resp_cookies)
+                except Exception:
+                    cookies = {}
+        status = getattr(response, "status_code", None)
+        logger.info(
+            f"Jackett: 登录 POST 收到 status={status}, 拿到 {len(cookies)} 个 cookie, "
+            f"keys={[c for c in cookies.keys()][:3]}"
+        )
+        if cookies:
+            self._session_cookies = cookies
+        elif status and status >= 400:
+            self._last_error = f"Jackett 登录返回 HTTP {status}"
+            logger.warning(f"Jackett: 登录返回 HTTP {status}，管理密码可能不正确")
+        return True
 
     async def _search_single_indexer(
         self,
@@ -448,7 +540,13 @@ class Jackett(_PluginBase):
         }
         if cat:
             params["cat"] = cat
-        url = f"{self._host}/api/v2.0/indexers/{indexer_id}/results/torznab/api?{urlencode(params)}"
+        # Jackett indexer ids are user-defined and may contain spaces or other
+        # characters that cannot be spliced into a path verbatim.
+        safe_indexer = quote(str(indexer_id), safe="")
+        url = (
+            f"{self._host}/api/v2.0/indexers/{safe_indexer}"
+            f"/results/torznab/api?{urlencode(params)}"
+        )
         # 日志路径用 path-only，不带 apikey query string，避免凭证泄漏到日志
         url_path = urlsplit(url).path
         try:
@@ -469,13 +567,13 @@ class Jackett(_PluginBase):
         headers, and cookies (get() returns just the body string)."""
         from app.adapters.network.http import AsyncRequestUtils
         url_path = urlsplit(url).path
-        # 60s: Jackett's per-indexer torznab call internally fetches the public
-        # site (e.g. 1337x.to). Slow public sites can legitimately exceed the
-        # previous 20s ceiling. When the call really fails (e.g. Jackett
-        # itself offline) httpx still raises, so this won't mask outages.
+        # 25s: fast indexers answer in a few seconds; slow public sites are
+        # dropped rather than eating the whole fan-out budget (a 60s per-request
+        # timeout made a 27-indexer install unable to finish, see
+        # _REQUEST_TIMEOUT).
         utils = AsyncRequestUtils(
             cookies=self._session_cookies or None,
-            timeout=60,
+            timeout=_REQUEST_TIMEOUT,
         )
         response = await utils.get_res(
             url,
@@ -505,7 +603,7 @@ class Jackett(_PluginBase):
                 await self._ensure_authenticated()
                 utils2 = AsyncRequestUtils(
                     cookies=self._session_cookies or None,
-                    timeout=60,
+                    timeout=_REQUEST_TIMEOUT,
                 )
                 response2 = await utils2.get_res(url, allow_redirects=False)
                 if response2 is None:
@@ -607,8 +705,10 @@ def _parse_torznab(xml_text: str, indexer_id: str) -> List[TorrentInfo]:
         desc_el = item.find("description")
 
         title = _text_of(title_el).strip()
-        link = _text_of(link_el).strip()
-        guid = _text_of(guid_el).strip() or link
+        # Only http(s)/magnet links: a malicious or broken indexer must not be
+        # able to hand javascript:/file: URLs to the downloader.
+        link = _safe_url(_text_of(link_el))
+        guid = _safe_url(_text_of(guid_el)) or link
 
         if not title or not link:
             continue
