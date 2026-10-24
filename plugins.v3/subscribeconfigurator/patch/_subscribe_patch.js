@@ -1,4 +1,15 @@
-/* SubscribeConfigurator — frontend patch v19
+/* SubscribeConfigurator — frontend patch v20
+ * v20 fixes:
+ *   1. Dialog detection also matches the dialog title (zh/en) and English
+ *      button labels, so a translated UI or a reworded button no longer
+ *      disables the panel; edit dialogs stay excluded.
+ *   2. Inject into the `.v-card-text` that actually holds the form (or the
+ *      last one) instead of always the first.
+ *   3. Per-title values (keyword / total_episode / season) are no longer
+ *      persisted in localStorage, so a value from a previous — or cancelled —
+ *      add cannot reappear. Preferences still persist.
+ *   4. A dialog whose form has not rendered yet is retried instead of being
+ *      injected into a half-built card.
  * v19 fixes:
  *   1. Only intercept the real add-subscription endpoint
  *      (`POST /api/v1/subscribe[/]`). The old `url.indexOf("/subscribe")`
@@ -44,7 +55,7 @@
   const LS_ONESHOT_KEY = "mp_subscribe_oneshot";
   const LS_SITE_ITEMS_KEY = "mp_sc_site_items";
   const PANEL_MARKER = "data-mp-subscribe-configurator";
-  const PANEL_VERSION = "v19";
+  const PANEL_VERSION = "v20";
   const API_BASE = "/api/v1";
   const OPTION_TTL_MS = 5 * 60 * 1000;
   const OPTION_CACHE = {};
@@ -71,6 +82,26 @@
   function isAddSubscribeUrl(url) {
     const path = String(url || "").split("#")[0].split("?")[0];
     return /(^|\/)api\/v1\/subscribe\/?$/.test(path);
+  }
+
+  // Per-title fields live in memory only. Persisting them meant a keyword /
+  // episode count typed for one subscription came back the next time the
+  // dialog was opened — including after a cancelled add. Preferences
+  // (quality, sites, filters, ...) still persist in localStorage.
+  let SESSION_OVERRIDES = {};
+
+  function effectiveOverrides() {
+    const merged = {};
+    const stored = readOverrides();
+    for (const k in stored) {
+      if (Object.prototype.hasOwnProperty.call(stored, k)) merged[k] = stored[k];
+    }
+    for (const k in SESSION_OVERRIDES) {
+      if (Object.prototype.hasOwnProperty.call(SESSION_OVERRIDES, k)) {
+        merged[k] = SESSION_OVERRIDES[k];
+      }
+    }
+    return merged;
   }
 
   // MP keeps the auth token in localStorage under "auth" -> {token, remember, ...}
@@ -145,6 +176,7 @@
   }
   function clearOverrides() {
     try {
+      SESSION_OVERRIDES = {};
       localStorage.removeItem(LS_OVERRIDES_KEY);
       localStorage.removeItem(LS_DEFAULT_EPISODE_KEY);
       // Keep LS_ONESHOT_KEY: "clear" should not silently re-enable one-shot
@@ -201,7 +233,7 @@
 
   function mergeOverrides(payload) {
     if (!payload || typeof payload !== "object") return false;
-    const overrides = readOverrides();
+    const overrides = effectiveOverrides();
     let changed = false;
     for (const k in overrides) {
       if (!Object.prototype.hasOwnProperty.call(overrides, k)) continue;
@@ -233,9 +265,12 @@
   }
 
   function maybeOneShot() {
+    // Per-title values are per-add: never carry them into the next dialog,
+    // even when the user keeps the preference template (one-shot off).
+    SESSION_OVERRIDES = {};
     if (!isOneShot()) return;
     clearOverrides();
-    console.info("[subscribeconfigurator v19] one-shot applied, overrides cleared");
+    console.info("[subscribeconfigurator v20] one-shot applied, overrides cleared");
   }
 
   // ── transport interception (MP uses axios → XMLHttpRequest) ──
@@ -257,7 +292,7 @@
           if (mergeOverrides(payload)) {
             body = JSON.stringify(payload);
             merged = true;
-            console.info("[subscribeconfigurator v19] overrides merged into subscribe POST");
+            console.info("[subscribeconfigurator v20] overrides merged into subscribe POST");
           }
         }
       } catch (e) {}
@@ -320,16 +355,28 @@
     return node;
   }
   function commitValue(model, val) {
+    const perTitle = PAYLOAD_PRIORITY_MODELS.has(model);
     const next = readOverrides();
-    if (val === "" || val === null || val === undefined) delete next[model];
-    else if (model === "search_interval") {
-      // MP schema: null = follow system, otherwise int hours
+    // v19 and earlier persisted per-title values; drop that copy so an old
+    // keyword/episode count cannot resurface from localStorage.
+    if (perTitle) delete next[model];
+
+    const empty = val === "" || val === null || val === undefined;
+    let normalized;
+    if (empty) normalized = null;
+    else if (model === "search_interval" || NUM_MODELS.has(model)) {
       const n = parseInt(val, 10);
-      if (isNaN(n)) delete next[model]; else next[model] = n;
-    } else if (model === "season" || model === "total_episode" || model === "start_episode") {
-      const n = parseInt(val, 10);
-      if (isNaN(n)) delete next[model]; else next[model] = n;
-    } else next[model] = val;
+      normalized = isNaN(n) ? null : n;
+    } else normalized = val;
+
+    if (perTitle) {
+      if (normalized === null) delete SESSION_OVERRIDES[model];
+      else SESSION_OVERRIDES[model] = normalized;
+    } else if (normalized === null) {
+      delete next[model];
+    } else {
+      next[model] = normalized;
+    }
     writeOverrides(next);
   }
   const svgIcon = (d, extra) =>
@@ -449,7 +496,7 @@
     anchor.appendChild(el("label", { class: "mp-sc-label", text: field.label }));
 
     const refresh = function () {
-      const ov = readOverrides();
+      const ov = effectiveOverrides();
       const v = ov[field.model];
       const s = v === undefined || v === null ? "" : String(v);
       valEl.textContent = s || (field.placeholder || "全部");
@@ -459,7 +506,7 @@
 
     const doOpen = function (ev) {
       if (ev) ev.stopPropagation();
-      const ov = readOverrides();
+      const ov = effectiveOverrides();
       const v = ov[field.model];
       const s = v === undefined || v === null ? "" : String(v);
       const isNative = s === "" || field.options.indexOf(s) !== -1;
@@ -514,7 +561,7 @@
     }
 
     function refresh() {
-      const ov = readOverrides();
+      const ov = effectiveOverrides();
       const v = ov[field.model];
       const sel = Array.isArray(v) ? v : (v ? [String(v)] : []);
       const labels = sel.map(siteLabel);
@@ -542,7 +589,7 @@
     }
 
     function promptManual() {
-      const ov = readOverrides();
+      const ov = effectiveOverrides();
       const raw = ov[field.model];
       const current = Array.isArray(raw) ? raw : (raw ? [String(raw)] : []);
       const initial = current.map(siteLabel).join(",");
@@ -609,7 +656,7 @@
             : "加载失败，点此重试/手填";
           valEl.classList.add("mp-sc-dd__value--ph");
           valEl.classList.add("mp-sc-dd__value--error");
-          console.warn("[subscribeconfigurator v19] load " + field.api + " failed", err && err.status);
+          console.warn("[subscribeconfigurator v20] load " + field.api + " failed", err && err.status);
         });
     }
 
@@ -624,7 +671,7 @@
         return;
       }
       if (!loaded) return;
-      const ov = readOverrides();
+      const ov = effectiveOverrides();
       const v = ov[field.model];
       const sel = Array.isArray(v) ? v.slice() : (v ? [String(v)] : []);
       const menuItems = items.map(function (it) {
@@ -774,7 +821,7 @@
   ];
 
   function buildPanel() {
-    const overrides = readOverrides();
+    const overrides = effectiveOverrides();
     const defaultEp = readDefaultEpisode();
     const isMobile = !!(window.matchMedia && window.matchMedia("(max-width:699px)").matches);
 
@@ -798,7 +845,7 @@
       clearOverrides();
       const fresh = buildPanel();
       panel.parentNode.replaceChild(fresh, panel);
-      console.info("[subscribeconfigurator v19] overrides cleared by user");
+      console.info("[subscribeconfigurator v20] overrides cleared by user");
     });
     hrow.appendChild(clearBtn);
     const toggleBtn = el("button", { type: "button", class: "mp-sc-toggle",
@@ -973,6 +1020,49 @@
 
   const DIALOG_SELECTOR = '.v-dialog, .v-overlay__content, [role="dialog"]';
 
+  // Dialog titles/buttons are the most stable signal available. Matching both
+  // Chinese and English means a translated UI or a wording tweak does not
+  // silently disable the panel (v19 only knew the exact Chinese labels).
+  const ADD_DIALOG_RE = /新增订阅|添加订阅|new subscription|add subscription|subscribe/i;
+  const EDIT_DIALOG_RE = /编辑订阅|edit subscription/i;
+  const ADD_BUTTON_RE = /^(提交订阅|添加订阅|新增订阅|请选择订阅季|subscribe|add subscription|submit)$/i;
+
+  function dialogTitle(dialog) {
+    const nodes = dialog.querySelectorAll(".v-card-title, .v-toolbar-title, .text-h6");
+    for (let i = 0; i < nodes.length; i++) {
+      const text = (nodes[i].textContent || "").trim();
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function isAddSubscribeDialog(dialog, text, btns) {
+    const title = dialogTitle(dialog);
+    if (EDIT_DIALOG_RE.test(title)) return false;
+    if (ADD_DIALOG_RE.test(title)) return true;
+    // Fallback for dialogs without a recognisable title: the submit button.
+    let isAdd = false;
+    for (let i = 0; i < btns.length; i++) {
+      const btnText = (btns[i].textContent || "").trim();
+      if (/^(保存|save)$/i.test(btnText) && EDIT_DIALOG_RE.test(text)) return false;
+      if (ADD_BUTTON_RE.test(btnText)) isAdd = true;
+    }
+    return isAdd;
+  }
+
+  // `.v-card-text` is Vuetify's scroll container
+  // (`.v-dialog--scrollable > .v-overlay__content > .v-card > .v-card-text`).
+  // A dialog may contain several; prefer the one holding the form, otherwise
+  // the last one (the first is often a title/description block).
+  function pickScrollContainer(dialog) {
+    const texts = dialog.querySelectorAll(".v-card-text");
+    for (let i = 0; i < texts.length; i++) {
+      if (texts[i].querySelector("input, textarea, .v-field")) return texts[i];
+    }
+    if (texts.length) return texts[texts.length - 1];
+    return dialog.querySelector(".v-card") || null;
+  }
+
   function tryInject(root) {
     if (!root) return;
     // Cheap self-heal: if an SPA re-render dropped the <style> tag while the
@@ -1005,30 +1095,30 @@
       if (dialog.classList && dialog.classList.contains("v-card-link")) return;
       const text = (dialog.textContent || "").trim();
       if (text.length < 4) return;
-      if (text.indexOf("开始集数") !== -1) return;
-      if (text.indexOf("总集数") !== -1) return;
-      const btns = dialog.querySelectorAll("button, .v-btn");
-      let isAdd = false;
-      for (let i = 0; i < btns.length; i++) {
-        const btnText = (btns[i].textContent || "").trim();
-        if (/^提交订阅$|^添加订阅$|^新增订阅$|^请选择订阅季$/.test(btnText)) isAdd = true;
-        if (btnText === "保存" && text.indexOf("编辑订阅") !== -1) return;
+      // Never stack panels: an old copy (or a markerless leftover) wins over a
+      // second injection. Do not key this off field labels — MP may add
+      // 总集数/开始集数 to the native dialog at any time.
+      if (dialog.querySelector(".mp-sc-panel")) {
+        dialog.__mp_sc_patched = true;
+        return;
       }
-      if (!isAdd) return;
+      const btns = dialog.querySelectorAll("button, .v-btn");
+      if (!isAddSubscribeDialog(dialog, text, btns)) return;
+      // The dialog shell can render before its form; skip this pass and retry
+      // on the next MutationObserver scan instead of injecting into a
+      // half-rendered card.
+      if (!dialog.querySelector("input, textarea, .v-field")) return;
       // Inject into the native scroll container instead of the dialog root.
-      // `.v-card-text` is the element Vuetify gives `overflow-y:auto` to
-      // (`.v-dialog--scrollable > .v-overlay__content > .v-card > .v-card-text`).
       // Appending to `.v-overlay__content` puts the panel outside that scroll
       // area; on mobile the dialog then cannot scroll to the panel or the
-      // submit button. If the card has not rendered yet, skip this pass and
-      // let the next MutationObserver scan retry.
-      const target = dialog.querySelector(".v-card-text") || dialog.querySelector(".v-card");
+      // submit button.
+      const target = pickScrollContainer(dialog);
       if (!target) return;
       target.appendChild(buildPanel());
       dialog.__mp_sc_patched = true;
       injected += 1;
     });
-    if (injected > 0) console.info("[subscribeconfigurator v19] injected into " + injected + " dialog(s)");
+    if (injected > 0) console.info("[subscribeconfigurator v20] injected into " + injected + " dialog(s)");
   }
 
   let injectTimer = null;
@@ -1067,16 +1157,16 @@
       });
     });
     obs.observe(document.body, { childList: true, subtree: true });
-    console.info("[subscribeconfigurator v19] loaded (XHR hook + custom dropdown)");
+    console.info("[subscribeconfigurator v20] loaded (XHR hook + custom dropdown)");
   }
 
   window.addEventListener("error", function (e) {
     if (e && e.filename && String(e.filename).indexOf("_subscribe_patch") !== -1)
-      console.error("[subscribeconfigurator v19] SCRIPT ERROR", e.message, ":" + e.lineno);
+      console.error("[subscribeconfigurator v20] SCRIPT ERROR", e.message, ":" + e.lineno);
   });
 
   try {
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", attach);
     else attach();
-  } catch (e) { console.error("[subscribeconfigurator v19] FATAL", e); }
+  } catch (e) { console.error("[subscribeconfigurator v20] FATAL", e); }
 })();
