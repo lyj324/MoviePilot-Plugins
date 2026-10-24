@@ -24,3 +24,7 @@ env/
 # Local-only notes
 *.local
 *.bak
+
+# Node (jsdom test tooling only)
+node_modules/
+package-lock.json

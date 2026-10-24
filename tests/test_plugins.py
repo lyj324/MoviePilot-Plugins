@@ -176,7 +176,9 @@ class SubscribeConfiguratorLifecycleTests(unittest.TestCase):
         injected = self.index.read_text(encoding="utf-8")
         self.assertIn("mp-subscribeconfigurator-patch", injected)
         self.assertTrue(self.patch_js.exists())
-        self.assertTrue((self.root / "index.html.subscribeconfigurator.bak").exists())
+        # 0.15.6 stopped writing a backup: restore strips the tag in place, so a
+        # copy of index.html would only be a stale file nobody reads.
+        self.assertFalse((self.root / "index.html.subscribeconfigurator.bak").exists())
 
         self._disable()
         self.assertEqual(self.index.read_text(encoding="utf-8"), INDEX_HTML)
@@ -184,11 +186,11 @@ class SubscribeConfiguratorLifecycleTests(unittest.TestCase):
         self.assertFalse((self.root / "index.html.subscribeconfigurator.bak").exists())
 
     def test_disable_after_frontend_upgrade_keeps_new_index(self):
-        """The .bak must never be written back over a newer index.html.
+        """A newer index.html must never be overwritten with an older snapshot.
 
         A MoviePilot image upgrade replaces /public/index.html with a new build;
-        restoring the pre-injection snapshot would point the SPA at asset
-        hashes that no longer exist.
+        restoring a pre-injection snapshot would point the SPA at asset hashes
+        that no longer exist.
         """
         self._enable()
         upgraded = INDEX_HTML.replace("index-abc.js", "index-upgraded.js")
@@ -199,10 +201,22 @@ class SubscribeConfiguratorLifecycleTests(unittest.TestCase):
         self.assertEqual(self.index.read_text(encoding="utf-8"), upgraded)
         self.assertFalse(self.patch_js.exists())
 
-    def test_disable_without_backup_removes_dead_script_tag(self):
-        # Simulates a lost .bak (e.g. plugin removed, then re-enabled manually).
+    def test_disable_with_legacy_backup_cleans_it_up(self):
+        # Installs upgraded from <=0.15.5 still have the stale backup file.
         self._enable()
-        (self.root / "index.html.subscribeconfigurator.bak").unlink()
+        bak = self.root / "index.html.subscribeconfigurator.bak"
+        bak.write_text(INDEX_HTML, encoding="utf-8")
+
+        self._disable()
+
+        content = self.index.read_text(encoding="utf-8")
+        self.assertNotIn("_subscribe_patch.js", content)
+        self.assertNotIn("mp-subscribeconfigurator-patch", content)
+        self.assertFalse(self.patch_js.exists())
+        self.assertFalse(bak.exists())
+
+    def test_disable_removes_dead_script_tag(self):
+        self._enable()
 
         self._disable()
 
@@ -351,6 +365,57 @@ class JackettParsingTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(fan_out()), [True, True, True, True])
         self.assertEqual(_FakeUtils.post_calls, 1)
+
+    def test_indexer_summary_text(self):
+        self.plugin._indexers = []
+        self.assertEqual(self.plugin._indexer_summary(), "全部（自动获取）")
+        self.plugin._indexers = ["1337x", "rarbg"]
+        self.assertEqual(self.plugin._indexer_summary(), "已指定 2 个（1337x, rarbg）")
+        self.plugin._indexers = ["a", "b", "c", "d", "e", "f", "g"]
+        summary = self.plugin._indexer_summary()
+        self.assertIn("已指定 7 个", summary)
+        self.assertIn("等 7 个", summary)
+        self.assertNotIn("g", summary.split("（")[1])
+
+    def test_no_redirect_wrapper_accepts_httpx_keyword(self):
+        calls = {}
+
+        class _HttpxStyle:
+            async def get_res(self, url, follow_redirects=True, **kwargs):
+                calls["kw"] = follow_redirects
+                return "body"
+
+        result = asyncio.run(
+            jackett_mod._request_no_redirect(_HttpxStyle(), "get_res", "http://x")
+        )
+        self.assertEqual(result, "body")
+        self.assertFalse(calls["kw"])
+
+    def test_no_redirect_wrapper_falls_back_to_requests_keyword(self):
+        calls = {}
+
+        class _RequestsStyle:
+            # Strict signature on purpose: an unknown keyword must raise, which
+            # is exactly what a requests-style wrapper does.
+            async def get_res(self, url, allow_redirects=True):
+                calls["kw"] = allow_redirects
+                return "body"
+
+        result = asyncio.run(
+            jackett_mod._request_no_redirect(_RequestsStyle(), "get_res", "http://x")
+        )
+        self.assertEqual(result, "body")
+        self.assertFalse(calls["kw"])
+
+    def test_no_redirect_wrapper_does_not_swallow_other_errors(self):
+        class _Broken:
+            async def get_res(self, url, follow_redirects=True):
+                raise TypeError("unsupported operand type(s) for +: 'NoneType'")
+
+        with self.assertRaises(TypeError):
+            asyncio.run(
+                jackett_mod._request_no_redirect(_Broken(), "get_res", "http://x")
+            )
 
     def test_deadline_covers_every_indexer(self):
         import math

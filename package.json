@@ -1,0 +1,11 @@
+{
+  "name": "moviepilot-plugins",
+  "private": true,
+  "description": "Dev-only tooling: jsdom regression tests for the plugin frontend patch.",
+  "scripts": {
+    "test": "node tests/js/run.cjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

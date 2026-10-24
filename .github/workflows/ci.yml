@@ -53,3 +53,9 @@ jobs:
 
       - name: Frontend patch syntax
         run: node --check plugins.v3/subscribeconfigurator/patch/_subscribe_patch.js
+
+      - name: Install jsdom
+        run: npm install --no-audit --no-fund
+
+      - name: Frontend (jsdom) tests
+        run: node tests/js/run.cjs
