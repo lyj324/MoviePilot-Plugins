@@ -2,6 +2,17 @@
 
 ## 2026-10-24
 
+### 订阅增强 0.15.6
+
+- 不再生成 `index.html.subscribeconfigurator.bak`。清理逻辑从 0.15.4 起就是原地移除注入的 `<script>` 与 marker，备份文件只剩「升级前的旧快照」这一个用途，留着反而容易被当成可用还原点。旧安装留下的 `.bak` 会在关闭/卸载插件时一并删除，插件页状态行改成「旧版遗留备份」。
+- 插件说明与代码注释同步更新（不再提「备份/还原」）。
+
+### Jackett 1.1.4
+
+- 统一「不跟随重定向」的写法。MoviePilot 的 `AsyncRequestUtils` 在不同版本分别接受 httpx 的 `follow_redirects` 与 requests 风格的 `allow_redirects`，传错关键字会在发请求前抛 `TypeError`，日志表现为「请求失败 [TypeError]」，看起来像 Jackett 宕机。现在统一走 `_request_no_redirect()`：先试 `follow_redirects`，只在异常信息确实提到该关键字时回退 `allow_redirects`，其它 `TypeError` 照常抛出。
+- 插件页「指定索引器」文案修正：有指定时不再显示成「全部 3」，改为「已指定 3 个（a, b, c）」，超过 5 个时带「等 N 个」。
+- 移除 `get_page()` 里未使用的 `get_config()` 调用。
+
 ### 订阅增强 0.15.5
 
 继续处理评审里暂缓的两项（面板识别、覆盖项跨会话残留）：

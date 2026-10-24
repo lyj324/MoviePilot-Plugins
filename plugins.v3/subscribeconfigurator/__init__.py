@@ -4,12 +4,12 @@
 1. ``init_plugin`` 启动时检查容器内 ``/public/index.html``：
    - 没有 marker 就把 plugin 包内 ``patch/_subscribe_patch.js`` 写入 ``/public/_subscribe_patch.js``
    - 在 ``</head>`` 前注入 ``<script defer src="/_subscribe_patch.js"></script>`` 和 marker 注释
-   - 备份原 index.html 到 ``/public/index.html.subscribeconfigurator.bak``
+   - 不生成备份文件：marker 里带版本号与配置指纹，注入与清理都只动这几行
 2. ``_subscribe_patch.js`` 在浏览器侧做两件事：
    - 拦截 ``fetch POST /api/v1/subscribe``，把 localStorage 里的字段合并到 body
    - MutationObserver 监听 dialog 出现，在表单底部注入额外输入框
 3. ``stop_service`` / 关闭插件时只移除注入的 ``<script>`` 与 marker，再删除
-   patch.js（不再整文件回写 .bak，避免把 MoviePilot 升级后的前端写回旧版本）
+   patch.js（整文件回写备份会把 MoviePilot 升级后的前端写回旧版本）
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class SubscribeConfigurator(_PluginBase):
     # ── 元数据 ──
     plugin_name = "订阅增强"
     plugin_desc = "在订阅添加对话框注入 start_episode / filter / quality 等字段，添加订阅时即可一次性配置。"
-    plugin_version = "0.15.5"
+    plugin_version = "0.15.6"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324/MoviePilot-Plugins"
     plugin_config_prefix = "subscribeconfigurator_"
@@ -167,7 +167,7 @@ class SubscribeConfigurator(_PluginBase):
 
         try:
             self._write_patch_js()
-            self._backup_and_inject(content, cfg_fp)
+            self._inject_into_index(content, cfg_fp)
             logger.info(
                 "SubscribeConfigurator: patch 注入完成（%s + %s）。"
                 "前端添加订阅对话框将出现「订阅增强」面板。",
@@ -347,7 +347,8 @@ class SubscribeConfigurator(_PluginBase):
 
     def get_page(self) -> List[dict]:
         state = bool(getattr(self, "_enabled", False))
-        bak_exists = os.path.exists(self.PUBLIC_INDEX + self.BACKUP_SUFFIX)
+        # Leftover from a pre-0.15.6 install; no longer created, only cleaned up.
+        legacy_bak = os.path.exists(self.PUBLIC_INDEX + self.BACKUP_SUFFIX)
         patch_exists = os.path.exists(self.PUBLIC_PATCH_JS)
         index_has_marker = False
         try:
@@ -359,19 +360,19 @@ class SubscribeConfigurator(_PluginBase):
             {
                 "component": "VAlert",
                 "props": {
-                    "type": "info" if (bak_exists or index_has_marker) else "warning",
+                    "type": "info" if index_has_marker else "warning",
                     "variant": "tonal",
                     "text": (
                         f"插件状态：{'已启用' if state else '未启用'}\n"
                         f"index.html marker：{'已注入' if index_has_marker else '未注入'}\n"
                         f"patch 脚本：{'存在' if patch_exists else '缺失'}\n"
-                        f"备份文件：{'存在' if bak_exists else '缺失'}\n"
+                        f"旧版遗留备份：{'存在（关闭插件时会被删除）' if legacy_bak else '无'}\n"
                         f"默认开始集数：{getattr(self, '_default_start_episode', 0)}\n"
                         f"自动套用默认值：{'是' if getattr(self, '_auto_apply_defaults', False) else '否'}\n\n"
                         "关闭或卸载插件会从 index.html 中移除注入的 <script> 与 marker，"
                         "并删除 patch 脚本，不需要手动还原。\n"
-                        f"备份文件（{self.BACKUP_SUFFIX}）只在注入时生成，供对照用，"
-                        "不会再被自动回写——避免把 MoviePilot 升级后的前端覆盖成旧版本。"
+                        f"本版本不再生成 {self.BACKUP_SUFFIX}：清理是原地移除标签，"
+                        "既不回写整份文件，也不会把 MoviePilot 升级后的前端覆盖成旧版本。"
                     ),
                 },
             }
@@ -401,10 +402,12 @@ class SubscribeConfigurator(_PluginBase):
         )
         self._atomic_write(self.PUBLIC_PATCH_JS, prefix + content)
 
-    def _backup_and_inject(self, content: str, cfg_fp: str) -> None:
-        bak = self.PUBLIC_INDEX + self.BACKUP_SUFFIX
-        self._atomic_write(bak, content)
-
+    def _inject_into_index(self, content: str, cfg_fp: str) -> None:
+        # Deliberately no .bak: the backup was only used by the old
+        # "restore the whole file" logic, which could roll MoviePilot's
+        # frontend back to a previous image after an upgrade. Restore now
+        # strips the tag in place, so keeping a copy of every deployed
+        # index.html (and a stale one at that) buys nothing.
         # cache-bust ts + plugin version + config fingerprint in script src so
         # the browser always refetches after a plugin upgrade or config change.
         # init_plugin reads both back from index.html to decide whether to skip.

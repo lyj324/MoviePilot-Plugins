@@ -75,6 +75,27 @@ def _safe_url(value: str) -> str:
     return ""
 
 
+async def _request_no_redirect(utils: Any, method: str, url: str, **kwargs: Any):
+    """Call MoviePilot's ``AsyncRequestUtils`` without following redirects.
+
+    MP wraps httpx, whose keyword is ``follow_redirects``; the requests-style
+    spelling is ``allow_redirects``. Which one the wrapper accepts depends on
+    the MP version, and an unknown keyword raises ``TypeError`` *before* the
+    request is sent — the resulting log line ("请求失败 [TypeError]") looks like
+    Jackett being unreachable, which sends users hunting the wrong problem.
+
+    Try the httpx spelling first and fall back only when the TypeError is about
+    that keyword name, so real errors still propagate.
+    """
+    fn = getattr(utils, method)
+    try:
+        return await fn(url, follow_redirects=False, **kwargs)
+    except TypeError as err:
+        if "follow_redirects" not in str(err):
+            raise
+    return await fn(url, allow_redirects=False, **kwargs)
+
+
 def _dedupe_torrents(items: List[TorrentInfo]) -> List[TorrentInfo]:
     """Keep one entry per release, preferring the one with more seeders.
 
@@ -112,7 +133,7 @@ class Jackett(_PluginBase):
     plugin_name = "Jackett"
     plugin_desc = "通过 Jackett (Torznab) 接入第三方索引器（1337x/RARBG/nyaa 等）。"
     plugin_icon = "https://raw.githubusercontent.com/Jackett/Jackett/master/src/Jackett.Common/Content/favicon.ico"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_author = "lyj324"
     author_url = "https://github.com/lyj324"
     plugin_config_prefix = "jackett_"
@@ -246,8 +267,16 @@ class Jackett(_PluginBase):
             },
         )
 
+    def _indexer_summary(self) -> str:
+        """Human-readable indexer selection for the plugin page."""
+        if not self._indexers:
+            return "全部（自动获取）"
+        shown = ", ".join(self._indexers[:5])
+        if len(self._indexers) > 5:
+            shown += f" 等 {len(self._indexers)} 个"
+        return f"已指定 {len(self._indexers)} 个（{shown}）"
+
     def get_page(self) -> List[dict]:
-        cfg = self.get_config() or {}
         status = "已启用" if self.get_state() else "未启用"
         return [
             {
@@ -258,7 +287,7 @@ class Jackett(_PluginBase):
                     "text": (
                         f"状态：{status}\n"
                         f"Jackett 地址：{self._host or '(未配置)'}\n"
-                        f"指定索引器：{'全部 ' + str(len(self._indexers)) if self._indexers else '全部（自动获取）'}\n"
+                        f"指定索引器：{self._indexer_summary()}\n"
                         f"最近搜索：{self._last_search or '(尚未搜索)'}\n"
                         f"最近错误：{self._last_error or '(无)'}"
                     ),
@@ -483,11 +512,11 @@ class Jackett(_PluginBase):
         try:
             from app.adapters.network.http import AsyncRequestUtils
             utils = AsyncRequestUtils(timeout=15)
-            # httpx 参数是 follow_redirects 而不是 allow_redirects
-            response = await utils.post(
+            response = await _request_no_redirect(
+                utils,
+                "post",
                 url,
                 data={"password": self._password},
-                follow_redirects=False,
             )
         except Exception as err:
             self._last_error = f"Jackett 登录失败: {type(err).__name__}"
@@ -575,10 +604,7 @@ class Jackett(_PluginBase):
             cookies=self._session_cookies or None,
             timeout=_REQUEST_TIMEOUT,
         )
-        response = await utils.get_res(
-            url,
-            allow_redirects=False,  # 关键：不要跟随 302 到登录页
-        )
+        response = await _request_no_redirect(utils, "get_res", url)
         if response is None:
             # httpx returns None on read/connect/timeout failure. Distinguish so
             # the user can tell timeouts apart from "Jackett itself down" in logs.
@@ -605,7 +631,7 @@ class Jackett(_PluginBase):
                     cookies=self._session_cookies or None,
                     timeout=_REQUEST_TIMEOUT,
                 )
-                response2 = await utils2.get_res(url, allow_redirects=False)
+                response2 = await _request_no_redirect(utils2, "get_res", url)
                 if response2 is None:
                     self._last_error = "重新登录后仍无响应"
                     return ""
